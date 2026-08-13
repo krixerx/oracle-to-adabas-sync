@@ -1,0 +1,7 @@
+{
+  "variables" : [ {
+    "name" : "ORACLE_HOST",
+    "value" : "localhost",
+    "description" : "Hop GUI on the host reaches the o2a-oracle container via the published port localhost:1521. Overrides the project default 'oracle' (Docker-internal hostname). Applied via the 'local-gui' Hop environment - see hop-config.json lifecycleEnvironments."
+  } ]
+}

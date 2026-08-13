@@ -1,0 +1,374 @@
+* APPLYEMP - sync apply API for EMPLOYEES (Adabas file 11).
+*
+* Reads one mapped batch (the mainframe-facing change files produced by
+* the Hop reverse-mapping pipelines) and applies it to Adabas THROUGH
+* Natural - i.e. through whatever business logic lives here. That is
+* this design's genuine advantage over a tool that writes into Adabas
+* directly and so bypasses Natural validation (spec decision D5).
+*
+* FILE FORMAT: FIXED-WIDTH (resolves open decision O3). READ WORK FILE
+* into a record structure does positional parsing natively, so there is
+* no delimiter, quoting or empty-field handling to get wrong. The
+* capture side keeps CSV; only the mainframe-facing leg is fixed-width.
+* Layouts are in CHANGE_FILE_CONTRACT.md.
+*
+* Input work files (staged into /sync/work by run-apply.sh):
+*   WF1 employee.dat            parent records
+*   WF2 employee_address_line.dat   MU
+*   WF3 employee_language.dat       MU
+*   WF4 employee_income.dat         PE
+*   WF6 batch_info.dat          batch number + end SCN
+* Output:
+*   WF5 apply_result.txt        one line per record + SUMMARY
+*
+* Key behaviours (spec C6):
+*   - op=D deletes (project owner's decision 2026-08-10, POC scope)
+*   - op=U is a FULL-STATE upsert, never a diff
+*   - COMPARE BEFORE WRITE: identical record => skip, count a no-op.
+*     Terminates echo loops and makes replay safe (decisions D7 / 5.2).
+*   - MU/PE sets replaced IN FULL; shrinking REQUIRES resetting the
+*     trailing occurrences BEFORE lowering the count - see SPIKEMU.NSP.
+*   - ledger (file 99) written in the SAME ET as the data, so restart is
+*     atomic: there is no window where data is applied but the mark is not.
+*
+* Headless: NO terminal WRITE statements (would trip the MORE prompt).
+DEFINE DATA LOCAL
+1 V VIEW OF EMPLOYEES
+  2 PERSONNEL-ID
+  2 FIRST-NAME
+  2 MIDDLE-NAME
+  2 NAME
+  2 MAR-STAT
+  2 SEX
+  2 BIRTH
+  2 CITY
+  2 POST-CODE
+  2 COUNTRY
+  2 DEPT
+  2 JOB-TITLE
+  2 C*ADDRESS-LINE
+  2 ADDRESS-LINE (1:20)
+  2 C*LANG
+  2 LANG (1:20)
+  2 C*INCOME
+  2 CURR-CODE (1:20)
+  2 SALARY (1:20)
+* BONUS is an MU nested INSIDE the INCOME PE group, and it is NOT mapped
+* to Oracle (migration never extracted it). It still has to be declared:
+* a PE occurrence stays alive while ANY field in the group holds data,
+* so leaving BONUS untouched keeps removed occurrences counted. See the
+* RESET in MOVE-FIELDS.
+  2 C*BONUS (1:20)
+  2 BONUS (1:20,1:20)
+1 L VIEW OF LEDGER
+  2 STREAM-ID
+  2 LAST-BATCH
+  2 LAST-SCN
+  2 APPLIED-UTC
+  2 ROWS-APPLIED
+  2 ROWS-SKIPPED
+  2 ROWS-REJECTED
+*
+* ---- parent record layout (159 bytes) ------------------------------
+1 #REC
+  2 #OP           (A1)
+  2 #PERSONNEL-ID (A8)
+  2 #FIRST-NAME   (A20)
+  2 #MIDDLE-NAME  (A20)
+  2 #LAST-NAME    (A20)
+  2 #BIRTH8       (A8)
+  2 #SEX          (A1)
+  2 #MAR-STAT     (A1)
+  2 #DEPT         (A6)
+  2 #JOB-TITLE    (A25)
+  2 #CITY         (A20)
+  2 #POST-CODE    (A10)
+  2 #COUNTRY      (A3)
+* ---- child record layouts ------------------------------------------
+1 #ADR-REC
+  2 #ADR-KEY  (A8)
+  2 #ADR-IDX  (N3)
+  2 #ADR-VAL  (A20)
+1 #LNG-REC
+  2 #LNG-KEY  (A8)
+  2 #LNG-IDX  (N3)
+  2 #LNG-VAL  (A3)
+1 #INC-REC
+  2 #INC-KEY  (A8)
+  2 #INC-IDX  (N3)
+  2 #INC-CUR  (A3)
+  2 #INC-SAL  (N9)
+1 #BATCH-REC
+  2 #BATCH-NO (N6)
+  2 #END-SCN  (N15)
+*
+1 #ADR      (A20/1:20)
+1 #ADR-CNT  (I4)
+1 #LNG      (A3/1:20)
+1 #LNG-CNT  (I4)
+1 #CUR      (A3/1:20)
+1 #SAL      (P9/1:20)
+1 #INC-CNT  (I4)
+*
+1 #LINE        (A) DYNAMIC
+1 #I           (I4)
+1 #FOUND       (L)
+1 #SAME        (L)
+1 #CNT-APPLIED (I4)
+1 #CNT-SKIPPED (I4)
+1 #CNT-DELETED (I4)
+1 #CNT-STORED  (I4)
+1 #LEDGER-FOUND (L)
+1 #SKIP        (L)
+1 #FROM        (I4)
+END-DEFINE
+*
+DEFINE WORK FILE 6 '/sync/work/batch_info.dat' TYPE 'ASCII'
+DEFINE WORK FILE 5 '/sync/work/apply_result.txt' TYPE 'ASCII'
+DEFINE WORK FILE 1 '/sync/work/employee.dat' TYPE 'ASCII'
+DEFINE WORK FILE 2 '/sync/work/employee_address_line.dat' TYPE 'ASCII'
+DEFINE WORK FILE 3 '/sync/work/employee_language.dat' TYPE 'ASCII'
+DEFINE WORK FILE 4 '/sync/work/employee_income.dat' TYPE 'ASCII'
+*
+RESET #SKIP
+* READ ... ONCE opens no processing loop, so it takes no END-WORK
+READ WORK FILE 6 ONCE #BATCH-REC
+*
+* ---- guard: never apply a batch at or below the watermark ----------
+* Batches must be applied in order and exactly once. The ledger is the
+* single source of truth for "how far did we get" (spec 5.3).
+RESET #LEDGER-FOUND
+FIND L WITH STREAM-ID = 'APPLY'
+  #LEDGER-FOUND := TRUE
+  IF LAST-BATCH GE #BATCH-NO
+    #SKIP := TRUE
+  END-IF
+END-FIND
+*
+IF #SKIP
+  COMPRESS 'ALREADY-APPLIED batch' #BATCH-NO
+    'is not newer than the ledger' INTO #LINE
+  WRITE WORK FILE 5 VARIABLE #LINE
+  WRITE WORK FILE 5 VARIABLE 'SUMMARY skipped-whole-batch'
+  CLOSE WORK FILE 5
+  ESCAPE ROUTINE
+END-IF
+*
+PERFORM LOAD-CHILDREN
+*
+RD1. READ WORK FILE 1 #REC
+  IF #OP = 'D'
+    PERFORM APPLY-DELETE
+  ELSE
+    PERFORM APPLY-UPSERT
+  END-IF
+END-WORK
+*
+* ---- ledger + data committed together ------------------------------
+IF #LEDGER-FOUND
+  FIND L WITH STREAM-ID = 'APPLY'
+    LAST-BATCH    := #BATCH-NO
+    LAST-SCN      := #END-SCN
+    APPLIED-UTC   := *TIMX
+    ROWS-APPLIED  := #CNT-APPLIED
+    ROWS-SKIPPED  := #CNT-SKIPPED
+    UPDATE
+  END-FIND
+ELSE
+  RESET L
+  STREAM-ID     := 'APPLY'
+  LAST-BATCH    := #BATCH-NO
+  LAST-SCN      := #END-SCN
+  APPLIED-UTC   := *TIMX
+  ROWS-APPLIED  := #CNT-APPLIED
+  ROWS-SKIPPED  := #CNT-SKIPPED
+  ROWS-REJECTED := 0
+  STORE L
+END-IF
+END TRANSACTION
+*
+COMPRESS 'SUMMARY batch=' #BATCH-NO 'stored=' #CNT-STORED
+  'updated=' #CNT-APPLIED 'skipped=' #CNT-SKIPPED
+  'deleted=' #CNT-DELETED INTO #LINE
+WRITE WORK FILE 5 VARIABLE #LINE
+CLOSE WORK FILE 5
+*
+* ====================================================================
+DEFINE SUBROUTINE APPLY-DELETE
+  RESET #FOUND
+  FIND V WITH PERSONNEL-ID = #PERSONNEL-ID
+    #FOUND := TRUE
+    DELETE
+  END-FIND
+  IF #FOUND
+    ADD 1 TO #CNT-DELETED
+    COMPRESS 'DELETED' #PERSONNEL-ID INTO #LINE
+  ELSE
+*   Already absent = already applied. Idempotent by design, not an error.
+    ADD 1 TO #CNT-SKIPPED
+    COMPRESS 'NOOP-DELETE-ABSENT' #PERSONNEL-ID INTO #LINE
+  END-IF
+  WRITE WORK FILE 5 VARIABLE #LINE
+END-SUBROUTINE
+*
+* ====================================================================
+DEFINE SUBROUTINE APPLY-UPSERT
+  RESET #FOUND #SAME
+  FIND V WITH PERSONNEL-ID = #PERSONNEL-ID
+    #FOUND := TRUE
+    PERFORM COMPARE-RECORD
+    IF #SAME
+*     COMPARE-BEFORE-WRITE (D7). The record is already in the desired
+*     state, so writing would only generate a PLOG entry that the other
+*     leg would capture and send back. Skipping terminates the loop.
+*     In steady state this counter should sit near zero - a rising
+*     count means the originator filter is leaking.
+      ADD 1 TO #CNT-SKIPPED
+      COMPRESS 'NOOP-IDENTICAL' #PERSONNEL-ID INTO #LINE
+      WRITE WORK FILE 5 VARIABLE #LINE
+    ELSE
+      PERFORM MOVE-FIELDS
+      UPDATE
+      ADD 1 TO #CNT-APPLIED
+      COMPRESS 'UPDATED' #PERSONNEL-ID INTO #LINE
+      WRITE WORK FILE 5 VARIABLE #LINE
+    END-IF
+  END-FIND
+*
+  IF NOT #FOUND
+    RESET V
+    PERFORM MOVE-FIELDS
+    STORE V
+    ADD 1 TO #CNT-STORED
+    COMPRESS 'STORED' #PERSONNEL-ID INTO #LINE
+    WRITE WORK FILE 5 VARIABLE #LINE
+  END-IF
+END-SUBROUTINE
+*
+* ====================================================================
+* Is the Adabas record already exactly what the batch asks for?
+* Compared AFTER mapping - Adabas values against Adabas values in one
+* type system - which is why this works where content hashing across
+* the conversion boundary did not.
+DEFINE SUBROUTINE COMPARE-RECORD
+  #SAME := TRUE
+  IF FIRST-NAME NE #FIRST-NAME OR MIDDLE-NAME NE #MIDDLE-NAME
+    #SAME := FALSE
+  END-IF
+  IF NAME NE #LAST-NAME OR MAR-STAT NE #MAR-STAT OR SEX NE #SEX
+    #SAME := FALSE
+  END-IF
+  IF CITY NE #CITY OR POST-CODE NE #POST-CODE OR COUNTRY NE #COUNTRY
+    #SAME := FALSE
+  END-IF
+  IF DEPT NE #DEPT OR JOB-TITLE NE #JOB-TITLE
+    #SAME := FALSE
+  END-IF
+  IF C*ADDRESS-LINE NE #ADR-CNT OR C*LANG NE #LNG-CNT
+    #SAME := FALSE
+  END-IF
+  IF C*INCOME NE #INC-CNT
+    #SAME := FALSE
+  END-IF
+  IF #SAME
+    FOR #I = 1 TO #ADR-CNT
+      IF ADDRESS-LINE(#I) NE #ADR(#I)
+        #SAME := FALSE
+      END-IF
+    END-FOR
+  END-IF
+  IF #SAME
+    FOR #I = 1 TO #LNG-CNT
+      IF LANG(#I) NE #LNG(#I)
+        #SAME := FALSE
+      END-IF
+    END-FOR
+  END-IF
+  IF #SAME
+    FOR #I = 1 TO #INC-CNT
+      IF CURR-CODE(#I) NE #CUR(#I) OR SALARY(#I) NE #SAL(#I)
+        #SAME := FALSE
+      END-IF
+    END-FOR
+  END-IF
+END-SUBROUTINE
+*
+* ====================================================================
+DEFINE SUBROUTINE MOVE-FIELDS
+  PERSONNEL-ID := #PERSONNEL-ID
+  FIRST-NAME   := #FIRST-NAME
+  MIDDLE-NAME  := #MIDDLE-NAME
+  NAME         := #LAST-NAME
+  MAR-STAT     := #MAR-STAT
+  SEX          := #SEX
+  MOVE EDITED #BIRTH8 TO BIRTH (EM=YYYYMMDD)
+  CITY         := #CITY
+  POST-CODE    := #POST-CODE
+  COUNTRY      := #COUNTRY
+  DEPT         := #DEPT
+  JOB-TITLE    := #JOB-TITLE
+*
+* ---- MU/PE FULL-SET REPLACEMENT (D8) -------------------------------
+* RESET the trailing occurrences BEFORE lowering the count. Lowering
+* the count alone leaves the old values in place AND leaves the count
+* unchanged - silent corruption. Proven by SPIKEMU.NSP 2026-08-10.
+  FOR #I = 1 TO #ADR-CNT
+    ADDRESS-LINE(#I) := #ADR(#I)
+  END-FOR
+  IF #ADR-CNT LT 20
+    RESET ADDRESS-LINE(#ADR-CNT + 1:20)
+  END-IF
+  C*ADDRESS-LINE := #ADR-CNT
+*
+  FOR #I = 1 TO #LNG-CNT
+    LANG(#I) := #LNG(#I)
+  END-FOR
+  IF #LNG-CNT LT 20
+    RESET LANG(#LNG-CNT + 1:20)
+  END-IF
+  C*LANG := #LNG-CNT
+*
+  FOR #I = 1 TO #INC-CNT
+    CURR-CODE(#I) := #CUR(#I)
+    SALARY(#I)    := #SAL(#I)
+  END-FOR
+* A PE occurrence survives while ANY field in the group still holds a
+* value - including BONUS, which this sync does not map. Resetting only
+* the mapped fields leaves C*INCOME too high with blank CURR/SALARY:
+* the fields you inspect all look empty and the count is still wrong.
+* So clear EVERY field of the removed occurrences, mapped or not.
+* Note the asymmetry: for SURVIVING occurrences BONUS must be left
+* alone - the read-modify-write preserves it, which is correct, because
+* Oracle has no opinion about a field it was never given.
+* NAT0027: a FOR start value must be a variable, not an expression
+  #FROM := #INC-CNT + 1
+  FOR #I = #FROM TO 20
+    RESET CURR-CODE(#I)
+    RESET SALARY(#I)
+    RESET BONUS(#I,1:20)
+    RESET C*BONUS(#I)
+  END-FOR
+  C*INCOME := #INC-CNT
+END-SUBROUTINE
+*
+* ====================================================================
+* Batches in this POC carry one aggregate at a time, so the child sets
+* are loaded once into arrays rather than re-read per parent.
+DEFINE SUBROUTINE LOAD-CHILDREN
+  RESET #ADR-CNT #LNG-CNT #INC-CNT
+  RD2. READ WORK FILE 2 #ADR-REC
+    ADD 1 TO #ADR-CNT
+    #ADR(#ADR-CNT) := #ADR-VAL
+  END-WORK
+  RD3. READ WORK FILE 3 #LNG-REC
+    ADD 1 TO #LNG-CNT
+    #LNG(#LNG-CNT) := #LNG-VAL
+  END-WORK
+  RD4. READ WORK FILE 4 #INC-REC
+    ADD 1 TO #INC-CNT
+    #CUR(#INC-CNT) := #INC-CUR
+    #SAL(#INC-CNT) := #INC-SAL
+  END-WORK
+END-SUBROUTINE
+*
+END

@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.example.o2a</groupId>
+  <artifactId>oracle-capture</artifactId>
+  <version>1.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <name>Oracle to Adabas sync - Oracle capture</name>
+  <description>
+    Debezium embedded engine + aggregate assembler: turns Oracle redo-log
+    changes into batch directories of change files for the Adabas apply leg.
+    Spec: specs/POC2_Oracle_to_Adabas_Sync.md (components C2, C3, C4).
+  </description>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- 3.6.1 is the latest FINAL. Deliberately not 3.7.0.Alpha1: a
+         reference implementation should not pin a pre-release. -->
+    <debezium.version>3.6.1.Final</debezium.version>
+    <ojdbc.version>23.5.0.24.07</ojdbc.version>
+    <slf4j.version>2.0.16</slf4j.version>
+    <jackson.version>2.18.2</jackson.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.debezium</groupId>
+      <artifactId>debezium-api</artifactId>
+      <version>${debezium.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.debezium</groupId>
+      <artifactId>debezium-embedded</artifactId>
+      <version>${debezium.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.debezium</groupId>
+      <artifactId>debezium-connector-oracle</artifactId>
+      <version>${debezium.version}</version>
+      <exclusions>
+        <!-- ehcache backs the OPTIONAL off-heap LogMiner buffer
+             (log.mining.buffer.type=ehcache). We use the default in-memory
+             buffer, so it is never loaded - the implementation is selected
+             reflectively from config.
+             It must be excluded because its own transitive JAXB chain
+             (jaxb-runtime -> jaxb-core -> javax.xml.bind:jaxb-api) resolves
+             only from maven.java.net, a dead repository whose TLS
+             certificate expired 2026-04-02: the build fails with a PKIX
+             path validation error that has nothing to do with this project.
+             If the off-heap buffer is ever needed, add ehcache back with
+             its JAXB dependencies excluded rather than dropping this. -->
+        <exclusion>
+          <groupId>org.ehcache</groupId>
+          <artifactId>ehcache</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
+    <!-- The Oracle connector needs a JDBC driver at runtime; Debezium does
+         not bundle one (same reason Hop needed the jar volume-mounted). -->
+    <dependency>
+      <groupId>com.oracle.database.jdbc</groupId>
+      <artifactId>ojdbc11</artifactId>
+      <version>${ojdbc.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>${jackson.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>${slf4j.version}</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>oracle-capture</finalName>
+    <plugins>
+      <!-- Pinned explicitly: Maven 3.6.3 defaults to compiler plugin 3.1,
+           which predates <maven.compiler.release> and falls back to
+           source/target 5 ("Source option 5 is no longer supported"). -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <!-- Single self-contained jar: the lab runs it with a bare
+           `java -jar`, and an air-gapped site can copy one file. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.6.0</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>com.example.o2a.capture.CaptureMain</mainClass>
+                </transformer>
+                <!-- Debezium and Kafka Connect ship META-INF/services entries
+                     that MUST be merged, not overwritten, or connector and
+                     converter lookup fails at runtime. -->
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+              </transformers>
+              <filters>
+                <filter>
+                  <artifact>*:*</artifact>
+                  <excludes>
+                    <exclude>META-INF/*.SF</exclude>
+                    <exclude>META-INF/*.DSA</exclude>
+                    <exclude>META-INF/*.RSA</exclude>
+                    <exclude>module-info.class</exclude>
+                  </excludes>
+                </filter>
+              </filters>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

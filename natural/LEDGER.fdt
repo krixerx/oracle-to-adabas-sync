@@ -1,0 +1,17 @@
+;############################################################################
+;#  LEDGER.fdt - FDT for the sync apply watermark file (Adabas file 99).
+;#
+;#  Written in the same ET as the applied data by the Natural apply API,
+;#  which is what makes restart atomic: there is no window in which data
+;#  is applied but the watermark is not (spec C6 / §5.2).
+;#
+;#  One record per apply stream, keyed by AA (unique descriptor).
+;############################################################################
+
+ 1   , AA ,   8 , A , DE,UQ         ;stream-id, e.g. 'APPLY'
+ 1   , AB ,   4 , B , NU            ;last-batch  - highest batch fully applied
+ 1   , AC ,   8 , P , NU            ;last-scn    - end_scn of that batch (15 digits)
+ 1   , AD ,  20 , A , NU            ;applied-utc - ISO 8601
+ 1   , AE ,   6 , P , NU            ;rows-applied
+ 1   , AF ,   6 , P , NU            ;rows-skipped   (compare-before-write no-ops)
+ 1   , AG ,   6 , P , NU            ;rows-rejected

@@ -1,0 +1,263 @@
+* SPIKEWRT - gating spike S4.
+* Proves Natural CE can WRITE to Adabas headlessly: STORE / UPDATE /
+* DELETE / END TRANSACTION, plus MU and PE FULL-SET REPLACEMENT
+* (spec decision D8 - the mechanism the apply API depends on).
+* the migration lab only ever read, so this is the highest-risk unknown.
+*
+* Operates ONLY on synthetic PERSONNEL-ID 'ZZ999901', so the EMPLOYEES
+* demo data the migration migrates is left untouched. Cleans up after
+* itself (and after an aborted earlier run) at step 0.
+* Headless run: NO terminal WRITE statements (avoids the MORE prompt);
+* all results go to work file 1.
+* Note: this Natural does not accept "#OK := <condition>"
+* (NAT0300), hence the RESET + IF pattern before each PERFORM REPORT.
+DEFINE DATA LOCAL
+1 V VIEW OF EMPLOYEES
+  2 PERSONNEL-ID
+  2 FIRST-NAME
+  2 NAME
+  2 MAR-STAT
+  2 SEX
+  2 BIRTH
+  2 CITY
+  2 POST-CODE
+  2 COUNTRY
+  2 DEPT
+  2 JOB-TITLE
+  2 C*ADDRESS-LINE
+  2 ADDRESS-LINE (1:10)
+  2 C*LANG
+  2 LANG (1:10)
+  2 C*INCOME
+  2 CURR-CODE (1:10)
+  2 SALARY (1:10)
+1 #KEY (A8)
+1 #ISN (N10)
+1 #ISN2 (N10)
+1 #LINE (A) DYNAMIC
+1 #TXT (A) DYNAMIC
+1 #BIRTH8 (A8)
+1 #N (I4)
+1 #NADR (I4)
+1 #NLNG (I4)
+1 #NINC (I4)
+1 #PASS (I4)
+1 #FAIL (I4)
+1 #OK (L)
+END-DEFINE
+*
+DEFINE WORK FILE 1 '/poc/data/spike_s4_result.txt' TYPE 'ASCII'
+#KEY := 'ZZ999901'
+*
+* ---- step 0: clean up leftovers from an aborted earlier run ------
+FIND V WITH PERSONNEL-ID = #KEY
+  DELETE
+END-FIND
+END TRANSACTION
+*
+* ---- step 1: STORE a new record incl. MU and PE occurrences ------
+RESET V
+PERSONNEL-ID := #KEY
+FIRST-NAME   := 'SPIKE'
+NAME         := 'WRITETEST'
+MAR-STAT     := 'S'
+SEX          := 'M'
+MOVE EDITED '19800515' TO BIRTH (EM=YYYYMMDD)
+CITY         := 'TALLINN'
+POST-CODE    := '10111'
+COUNTRY      := 'EST'
+DEPT         := 'IT'
+JOB-TITLE    := 'ENGINEER'
+ADDRESS-LINE(1) := 'LINE-A'
+ADDRESS-LINE(2) := 'LINE-B'
+C*ADDRESS-LINE  := 2
+LANG(1) := 'EST'
+LANG(2) := 'ENG'
+LANG(3) := 'GER'
+C*LANG  := 3
+CURR-CODE(1) := 'EUR'
+SALARY(1)    := 50000
+CURR-CODE(2) := 'EUR'
+SALARY(2)    := 55000
+C*INCOME     := 2
+STO. STORE V
+#ISN := *ISN(STO.)
+END TRANSACTION
+*
+#TXT := 'store-returns-isn'
+RESET #OK
+IF #ISN GT 0
+  #OK := TRUE
+END-IF
+PERFORM REPORT
+*
+* ---- step 2: verify what was stored ------------------------------
+RESET #N #NADR #NLNG #NINC #ISN2
+FIND V WITH PERSONNEL-ID = #KEY
+  ADD 1 TO #N
+  #ISN2 := *ISN
+  #NADR := C*ADDRESS-LINE
+  #NLNG := C*LANG
+  #NINC := C*INCOME
+  MOVE EDITED BIRTH (EM=YYYYMMDD) TO #BIRTH8
+*
+  #TXT := 'stored-record-found'
+  RESET #OK
+  IF #N EQ 1
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+  #TXT := 'isn-from-store-matches-read'
+  RESET #OK
+  IF #ISN2 EQ #ISN
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+  #TXT := 'scalar-city-stored'
+  RESET #OK
+  IF CITY EQ 'TALLINN'
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+  #TXT := 'date-roundtrip-19800515'
+  RESET #OK
+  IF #BIRTH8 EQ '19800515'
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+  #TXT := 'mu-address-count-2'
+  RESET #OK
+  IF #NADR EQ 2
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+  #TXT := 'mu-address-values'
+  RESET #OK
+  IF ADDRESS-LINE(1) EQ 'LINE-A' AND ADDRESS-LINE(2) EQ 'LINE-B'
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+  #TXT := 'mu-lang-count-3'
+  RESET #OK
+  IF #NLNG EQ 3
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+  #TXT := 'pe-income-count-2'
+  RESET #OK
+  IF #NINC EQ 2
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+  #TXT := 'pe-salary-values'
+  RESET #OK
+  IF SALARY(1) EQ 50000 AND SALARY(2) EQ 55000
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+END-FIND
+*
+* ---- step 3: UPDATE - scalar change + MU/PE full-set replacement -
+* address lines grow 2 -> 3, languages SHRINK 3 -> 1, income 2 -> 1.
+* Shrinking is the hard case and the one D8 depends on.
+* RULE (proven by SPIKEMU): lowering the count field alone does NOT
+* remove trailing occurrences - they survive as stale residue and the
+* count stays put. The trailing occurrences must be RESET explicitly
+* BEFORE the count is lowered. Getting this wrong corrupts silently.
+FIND V WITH PERSONNEL-ID = #KEY
+  CITY := 'TARTU'
+  ADDRESS-LINE(1) := 'NEW-1'
+  ADDRESS-LINE(2) := 'NEW-2'
+  ADDRESS-LINE(3) := 'NEW-3'
+  RESET ADDRESS-LINE(4:10)
+  C*ADDRESS-LINE  := 3
+  LANG(1) := 'FIN'
+  RESET LANG(2:10)
+  C*LANG  := 1
+  CURR-CODE(1) := 'USD'
+  SALARY(1)    := 60000
+  RESET CURR-CODE(2:10) SALARY(2:10)
+  C*INCOME     := 1
+  UPDATE
+END-FIND
+END TRANSACTION
+*
+* ---- step 4: verify the update ------------------------------------
+RESET #N #NADR #NLNG #NINC
+FIND V WITH PERSONNEL-ID = #KEY
+  ADD 1 TO #N
+  #NADR := C*ADDRESS-LINE
+  #NLNG := C*LANG
+  #NINC := C*INCOME
+*
+  #TXT := 'update-scalar-city-tartu'
+  RESET #OK
+  IF CITY EQ 'TARTU'
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+  #TXT := 'mu-address-grown-to-3'
+  RESET #OK
+  IF #NADR EQ 3 AND ADDRESS-LINE(3) EQ 'NEW-3'
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+  #TXT := 'mu-lang-SHRUNK-to-1'
+  RESET #OK
+  IF #NLNG EQ 1 AND LANG(1) EQ 'FIN'
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+  #TXT := 'pe-income-SHRUNK-to-1'
+  RESET #OK
+  IF #NINC EQ 1 AND SALARY(1) EQ 60000
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+END-FIND
+*
+* ---- step 5: DELETE and verify it is gone -------------------------
+FIND V WITH PERSONNEL-ID = #KEY
+  DELETE
+END-FIND
+END TRANSACTION
+*
+RESET #N
+FIND V WITH PERSONNEL-ID = #KEY
+  ADD 1 TO #N
+END-FIND
+#TXT := 'delete-removed-record'
+RESET #OK
+IF #N EQ 0
+  #OK := TRUE
+END-IF
+PERFORM REPORT
+*
+* ---- summary ------------------------------------------------------
+COMPRESS 'SUMMARY' #PASS 'passed' #FAIL 'failed' INTO #LINE
+WRITE WORK FILE 1 VARIABLE #LINE
+CLOSE WORK FILE 1
+*
+DEFINE SUBROUTINE REPORT
+  IF #OK
+    ADD 1 TO #PASS
+    COMPRESS 'PASS' #TXT INTO #LINE
+  ELSE
+    ADD 1 TO #FAIL
+    COMPRESS 'FAIL' #TXT INTO #LINE
+  END-IF
+  WRITE WORK FILE 1 VARIABLE #LINE
+END-SUBROUTINE
+*
+END

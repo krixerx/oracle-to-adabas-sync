@@ -1,0 +1,16 @@
+{
+  "metadataBaseFolder": "${PROJECT_HOME}/metadata",
+  "unitTestsBasePath": "${PROJECT_HOME}",
+  "dataSetsCsvFolder": "${PROJECT_HOME}/datasets",
+  "enforcingExecutionInHome": true,
+  "parentProjectName": "default",
+  "config": {
+    "variables": [
+      {
+        "name": "ORACLE_HOST",
+        "value": "oracle",
+        "description": "Oracle hostname. MUST stay the compose service name: Hop project variables OVERRIDE OS environment variables, so a value of 127.0.0.1 here silently defeats the ORACLE_HOST=oracle set by docker-compose and every container run fails with ORA-12541. Host-side runs (Hop GUI) override it through the 'local-gui' ENVIRONMENT (hop-env-local-gui.json), which is the only layer that wins over this default."
+      }
+    ]
+  }
+}

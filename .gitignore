@@ -1,0 +1,33 @@
+# --- build output -----------------------------------------------------------
+capture/target/
+
+# --- third-party binaries (fetch these yourself; see README "Prerequisites") -
+# Oracle JDBC is OTN-licensed and not redistributed here.
+hop/lib/*.jar
+
+# --- runtime state ----------------------------------------------------------
+# Everything below is produced by a lab run and is recreated from scratch.
+sync/outbox/
+sync/inbox/
+sync/applied/
+sync/rejected/
+sync/work/
+sync/state/
+
+# spike scratch output
+data/*.txt
+
+# logs
+*.log
+*.err
+
+# --- editor / OS / agent ----------------------------------------------------
+.claude/
+.idea/
+.vscode/
+*.iml
+Thumbs.db
+desktop.ini
+
+# keep empty scaffolding directories
+!**/.gitkeep

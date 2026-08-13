@@ -1,0 +1,119 @@
+# Oracle -> Adabas log-based sync lab.
+# Everything runs on the internal network; no internet needed after image pulls.
+#
+# DUPLICATED in the sibling repo (adabas-to-oracle-migration) with a different
+# project name, container prefix and service set. If you change something
+# structural here, check whether the other one needs it too.
+#
+# PORTS: 60001, 8190, 2700, 1521 and 8081 are published. The sibling repo
+# publishes all of those except 8081. Stop one lab before starting the other.
+
+name: o2a
+
+services:
+
+  adabas:
+    image: softwareag/adabas-ce:7.4.0
+    container_name: o2a-adabas
+    hostname: o2a-adabas   # fixed: nucleus writes a host-bound lock (/data/db001/_DB_LOCK);
+                           # a recreated container with a random hostname trips ADANUC-F-CONCURRLOCKHOST
+    environment:
+      ACCEPT_EULA: "Y"
+      ADABAS_ADMIN_USER: admin      # REST service credentials (spike finding)
+      ADABAS_ADMIN_PWD: manage
+      # Demo DB: DBID 001, created by crdemodb on first start (default ADABAS_DB_CREATION=demodb)
+    ports:
+      - "60001:60001"   # Adabas TCP
+      - "8190:8190"     # Adabas REST server (built into adabas-ce)
+    volumes:
+      - adabas-data:/data
+    networks: [o2a]
+
+  natural:
+    image: softwareag/natural-ce:9.3.3
+    container_name: o2a-natural
+    environment:
+      ACCEPT_EULA: "Y"
+    depends_on: [adabas]
+    ports:
+      - "2700:2700"     # Natural development server for NaturalONE
+    volumes:
+      - ./natural:/poc/natural:ro   # apply program sources (host-edited)
+      - ./sync:/sync                # inbox/applied/rejected + work staging
+      - ./data:/poc/data            # scratch space: the spike programs write
+                                    # their result files here (run-spike-*.sh)
+    networks: [o2a]
+
+  oracle:
+    image: gvenzl/oracle-free:23-slim
+    container_name: o2a-oracle
+    environment:
+      ORACLE_PASSWORD: PocSysPwd1
+      APP_USER: pocapp
+      APP_USER_PASSWORD: pocapp
+    ports:
+      - "1521:1521"
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+      - ./oracle-init:/container-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 120s
+    networks: [o2a]
+
+  # Long-lived Hop JVM for the sync's reverse field mapping.
+  # Started only with the `sync` profile.
+  #
+  # WHY A SERVER AND NOT `hop-run` PER BATCH: a cold `hop-run` costs ~23 s of JVM
+  # startup against ~0.4 s warm - a 54x gap measured during the spikes. The sync
+  # latency budget is 5-10 s END TO END, so spawning a JVM per batch would be
+  # dominated by startup: the mapping step alone would cost several times the
+  # entire budget. The server keeps one warm JVM and takes work over REST.
+  #
+  # Server mode is selected by the ABSENCE of HOP_FILE_PATH and HOP_COMMAND
+  # (see /opt/hop/load-and-execute.sh) - there is no explicit "mode" switch.
+  hop-server:
+    image: apache/hop:latest
+    container_name: o2a-hop-server
+    profiles: ["sync"]
+    depends_on:
+      oracle:
+        condition: service_healthy
+    environment:
+      HOP_PROJECT_FOLDER: /poc/hop
+      HOP_PROJECT_NAME: o2a
+      HOP_SERVER_PORT: 8081
+      HOP_SERVER_SHUTDOWNPORT: 8082
+      HOP_SERVER_HOSTNAME: 0.0.0.0
+      HOP_SERVER_USER: cluster
+      HOP_SERVER_PASS: cluster
+      HOP_LOG_LEVEL: Basic
+      ORACLE_HOST: oracle
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./hop:/poc/hop
+      - ./sync:/sync
+      # ojdbc11.jar is NOT in this repo (Oracle OTN licence) - see README
+      # "Prerequisites". sync-verify.cmd checks it exists before starting the
+      # lab, because Docker would otherwise create a DIRECTORY with this name.
+      - ./hop/lib/ojdbc11.jar:/opt/hop/lib/jdbc/ojdbc11.jar:ro
+    healthcheck:
+      # getStatus is the cheapest authenticated endpoint that proves the
+      # REST layer is up, not merely the port being bound.
+      test: ["CMD-SHELL", "curl -sf -u cluster:cluster http://localhost:8081/hop/status/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+    networks: [o2a]
+
+volumes:
+  adabas-data:
+  oracle-data:
+
+networks:
+  o2a:

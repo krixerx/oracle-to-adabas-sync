@@ -1,0 +1,11 @@
+;############################################################################
+;#  LEDGER.fdu - ADAFDU parameters for the sync apply watermark file.
+;#  Used together with LEDGER.fdt (pointed to by $FDUFDT).
+;#  dbid= and file= are prepended by scripts/create-ledger.sh.
+;############################################################################
+name   = SYNCLEDGER
+maxisn = 1000
+nisize = 5b
+uisize = 5b
+dssize = 5b
+reuse  = (isn,ds)

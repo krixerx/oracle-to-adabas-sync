@@ -1,0 +1,38 @@
+# Line endings matter here, because this repo is edited on Windows but half of
+# it executes inside Linux containers.
+#
+# Without this file, a clone on a machine with core.autocrlf=true checks the
+# shell scripts out with CRLF. They are bind-mounted into the Natural container
+# and run with `sh`, which then fails on the trailing \r - usually with an
+# unhelpful "command not found". That would break `migrate.cmd` on a fresh
+# clone, which is exactly the path this repo exists to make work.
+
+# Normalise everything to LF in the repository.
+* text=auto eol=lf
+
+# Windows entry points keep CRLF in the working tree.
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Consumed inside the Linux containers - must stay LF.
+*.sh   text eol=lf
+
+# Natural sources and Adabas file definitions are read by tools in the
+# containers, and Natural source is column-sensitive - do not let anything
+# rewrite them.
+*.NSP  text eol=lf
+*.NSN  text eol=lf
+*.NSD  text eol=lf
+*.fdt  text eol=lf
+*.fdu  text eol=lf
+
+# Hop pipelines/workflows are XML read by the Hop container.
+*.hpl  text eol=lf
+*.hwf  text eol=lf
+
+*.jar  binary
+
+# Oracle init scripts are executed by sqlplus inside the container.
+*.sql        text eol=lf
+*.properties text eol=lf
+*.java       text eol=lf

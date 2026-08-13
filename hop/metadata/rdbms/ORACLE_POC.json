@@ -1,0 +1,24 @@
+{
+  "rdbms": {
+    "ORACLE": {
+      "databaseName": "FREEPDB1",
+      "pluginId": "ORACLE",
+      "accessType": 0,
+      "hostname": "${ORACLE_HOST}",
+      "password": "pocapp",
+      "pluginName": "Oracle",
+      "port": "1521",
+      "attributes": {
+        "SUPPORTS_TIMESTAMP_DATA_TYPE": "Y",
+        "QUOTE_ALL_FIELDS": "N",
+        "FORCE_IDENTIFIERS_TO_LOWERCASE": "N",
+        "FORCE_IDENTIFIERS_TO_UPPERCASE": "N",
+        "PRESERVE_RESERVED_WORD_CASE": "Y",
+        "PREFERRED_SCHEMA_NAME": "POCAPP"
+      },
+      "manualUrl": "jdbc:oracle:thin:@//${ORACLE_HOST}:1521/FREEPDB1",
+      "username": "pocapp"
+    }
+  },
+  "name": "ORACLE_POC"
+}

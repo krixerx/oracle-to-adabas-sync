@@ -1,0 +1,18 @@
+DB: 000 FILE: 099  - LEDGER                           DEFAULT SEQUENCE:   
+TYPE: ADABAS
+ 
+T L DB Name                              F Leng  S D Remark
+- - -- --------------------------------  - ----  - - ------------------------
+  1 AA STREAM-ID                         A    8    D
+*      APPLY WATERMARK - ONE RECORD PER STREAM
+*      DDM NAME IN THE HEADER ABOVE MUST MATCH THE OBJECT NAME
+*      (LEDGER.NSD) OR NATURAL CANNOT CATALOG IT - NAT0082.
+*      IT NEED NOT MATCH THE ADABAS FILE NAME (SYNCLEDGER):
+*      A DDM BINDS BY FILE NUMBER, NOT BY NAME.
+  1 AB LAST-BATCH                        B    4  N
+  1 AC LAST-SCN                          P 15.0  N
+  1 AD APPLIED-UTC                       A   20  N
+  1 AE ROWS-APPLIED                      P 11.0  N
+  1 AF ROWS-SKIPPED                      P 11.0  N
+  1 AG ROWS-REJECTED                     P 11.0  N
+******DDM OUTPUT TERMINATED******

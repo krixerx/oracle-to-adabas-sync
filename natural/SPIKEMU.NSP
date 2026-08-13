@@ -1,0 +1,130 @@
+* SPIKEMU - spike S4b: how do you SHRINK an MU / PE set?
+* S4 proved STORE/UPDATE/DELETE/ET all work, but lowering the count
+* field alone (C*LANG := 1) did NOT remove trailing occurrences.
+* Full-set replacement (spec decision D8) depends on shrinking, so
+* this program tries the candidate idioms and reports what Adabas
+* actually stored after each one.
+*
+* Uses synthetic PERSONNEL-ID 'ZZ999902'; demo data untouched.
+* No terminal WRITE (headless); results go to work file 1.
+DEFINE DATA LOCAL
+1 V VIEW OF EMPLOYEES
+  2 PERSONNEL-ID
+  2 NAME
+  2 C*LANG
+  2 LANG (1:10)
+  2 C*INCOME
+  2 CURR-CODE (1:10)
+  2 SALARY (1:10)
+1 #KEY (A8)
+1 #LINE (A) DYNAMIC
+1 #TXT (A) DYNAMIC
+1 #I (I4)
+1 #NLNG (I4)
+1 #NINC (I4)
+END-DEFINE
+*
+DEFINE WORK FILE 1 '/poc/data/spike_mu_result.txt' TYPE 'ASCII'
+#KEY := 'ZZ999902'
+*
+* ---- helper: (re)create the record with LANG=3, INCOME=2 ---------
+* done inline before each strategy so every strategy starts equal
+*
+* ================= STRATEGY 1: lower C* only =======================
+PERFORM SETUP
+FIND V WITH PERSONNEL-ID = #KEY
+  LANG(1) := 'FIN'
+  C*LANG  := 1
+  CURR-CODE(1) := 'USD'
+  SALARY(1)    := 60000
+  C*INCOME     := 1
+  UPDATE
+END-FIND
+END TRANSACTION
+#TXT := 'S1-lower-count-only'
+PERFORM SHOW
+*
+* ========== STRATEGY 2: RESET trailing occurrences, then C* ========
+PERFORM SETUP
+FIND V WITH PERSONNEL-ID = #KEY
+  LANG(1) := 'FIN'
+  RESET LANG(2:10)
+  C*LANG  := 1
+  CURR-CODE(1) := 'USD'
+  SALARY(1)    := 60000
+  RESET CURR-CODE(2:10) SALARY(2:10)
+  C*INCOME     := 1
+  UPDATE
+END-FIND
+END TRANSACTION
+#TXT := 'S2-reset-trailing-then-count'
+PERFORM SHOW
+*
+* ========== STRATEGY 3: two-step - empty the set, then refill ======
+PERFORM SETUP
+FIND V WITH PERSONNEL-ID = #KEY
+  RESET LANG(1:10)
+  C*LANG := 0
+  RESET CURR-CODE(1:10) SALARY(1:10)
+  C*INCOME := 0
+  UPDATE
+END-FIND
+END TRANSACTION
+FIND V WITH PERSONNEL-ID = #KEY
+  LANG(1) := 'FIN'
+  C*LANG  := 1
+  CURR-CODE(1) := 'USD'
+  SALARY(1)    := 60000
+  C*INCOME     := 1
+  UPDATE
+END-FIND
+END TRANSACTION
+#TXT := 'S3-empty-then-refill'
+PERFORM SHOW
+*
+* ---- cleanup ------------------------------------------------------
+FIND V WITH PERSONNEL-ID = #KEY
+  DELETE
+END-FIND
+END TRANSACTION
+CLOSE WORK FILE 1
+*
+* ===================================================================
+DEFINE SUBROUTINE SETUP
+  FIND V WITH PERSONNEL-ID = #KEY
+    DELETE
+  END-FIND
+  END TRANSACTION
+  RESET V
+  PERSONNEL-ID := #KEY
+  NAME    := 'MUTEST'
+  LANG(1) := 'EST'
+  LANG(2) := 'ENG'
+  LANG(3) := 'GER'
+  C*LANG  := 3
+  CURR-CODE(1) := 'EUR'
+  SALARY(1)    := 50000
+  CURR-CODE(2) := 'EUR'
+  SALARY(2)    := 55000
+  C*INCOME     := 2
+  STORE V
+  END TRANSACTION
+END-SUBROUTINE
+*
+* ---- report what is actually in the record now --------------------
+DEFINE SUBROUTINE SHOW
+  RESET #NLNG #NINC
+  FIND V WITH PERSONNEL-ID = #KEY
+    #NLNG := C*LANG
+    #NINC := C*INCOME
+    COMPRESS #TXT '| C*LANG=' #NLNG '| C*INCOME=' #NINC INTO #LINE
+    WRITE WORK FILE 1 VARIABLE #LINE
+    FOR #I = 1 TO 4
+      COMPRESS '    LANG(' #I ')=[' LANG(#I) ']  CURR(' #I ')=['
+        CURR-CODE(#I) ']  SAL(' #I ')=' SALARY(#I) INTO #LINE
+      WRITE WORK FILE 1 VARIABLE #LINE
+    END-FOR
+  END-FIND
+END-SUBROUTINE
+*
+END

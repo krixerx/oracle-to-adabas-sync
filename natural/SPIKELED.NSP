@@ -1,0 +1,128 @@
+* SPIKELED - gating spike S5 (second half).
+* ADAFDU created Adabas file 99 (SYNCLEDGER). This proves the file is
+* actually USABLE from Natural: STORE a watermark, read it back,
+* UPDATE it, and confirm the values survive END TRANSACTION.
+* That is the mechanism behind spec C6 / §5.2 - the watermark is
+* written in the SAME ET as the applied data, so restart is atomic.
+*
+* No terminal WRITE (headless); results go to work file 1.
+DEFINE DATA LOCAL
+1 L VIEW OF LEDGER
+  2 STREAM-ID
+  2 LAST-BATCH
+  2 LAST-SCN
+  2 APPLIED-UTC
+  2 ROWS-APPLIED
+  2 ROWS-SKIPPED
+  2 ROWS-REJECTED
+1 #LINE (A) DYNAMIC
+1 #TXT (A) DYNAMIC
+1 #N (I4)
+1 #PASS (I4)
+1 #FAIL (I4)
+1 #OK (L)
+END-DEFINE
+*
+DEFINE WORK FILE 1 '/poc/data/spike_s5_result.txt' TYPE 'ASCII'
+*
+* ---- clean slate --------------------------------------------------
+FIND L WITH STREAM-ID = 'APPLY'
+  DELETE
+END-FIND
+END TRANSACTION
+*
+* ---- STORE the initial watermark ----------------------------------
+RESET L
+STREAM-ID     := 'APPLY'
+LAST-BATCH    := 41
+LAST-SCN      := 5483525
+APPLIED-UTC   := '2026-08-09T13:00:00Z'
+ROWS-APPLIED  := 100
+ROWS-SKIPPED  := 2
+ROWS-REJECTED := 0
+STORE L
+END TRANSACTION
+*
+RESET #N
+FIND L WITH STREAM-ID = 'APPLY'
+  ADD 1 TO #N
+  #TXT := 'ledger-store-and-read'
+  RESET #OK
+  IF #N EQ 1 AND LAST-BATCH EQ 41
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+  #TXT := 'ledger-scn-15-digits'
+  RESET #OK
+  IF LAST-SCN EQ 5483525
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+  #TXT := 'ledger-utc-text'
+  RESET #OK
+  IF APPLIED-UTC EQ '2026-08-09T13:00:00Z'
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+END-FIND
+*
+* ---- UPDATE the watermark (the per-batch operation) ---------------
+FIND L WITH STREAM-ID = 'APPLY'
+  LAST-BATCH    := 42
+  LAST-SCN      := 999999999999999
+  APPLIED-UTC   := '2026-08-09T13:05:00Z'
+  ROWS-APPLIED  := 137
+  ROWS-SKIPPED  := 5
+  UPDATE
+END-FIND
+END TRANSACTION
+*
+FIND L WITH STREAM-ID = 'APPLY'
+  #TXT := 'ledger-update-batch-42'
+  RESET #OK
+  IF LAST-BATCH EQ 42 AND ROWS-APPLIED EQ 137
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+*
+* 15-digit SCN headroom: Oracle SCNs are far larger than a 4-byte int,
+* so the packed-15 field must hold the maximum without truncation.
+  #TXT := 'ledger-scn-max-15-digits'
+  RESET #OK
+  IF LAST-SCN EQ 999999999999999
+    #OK := TRUE
+  END-IF
+  PERFORM REPORT
+END-FIND
+*
+* ---- unique descriptor must reject a second stream record ---------
+* (guards against two appliers silently keeping separate watermarks)
+RESET #N
+FIND L WITH STREAM-ID = 'APPLY'
+  ADD 1 TO #N
+END-FIND
+#TXT := 'ledger-single-record-per-stream'
+RESET #OK
+IF #N EQ 1
+  #OK := TRUE
+END-IF
+PERFORM REPORT
+*
+COMPRESS 'SUMMARY' #PASS 'passed' #FAIL 'failed' INTO #LINE
+WRITE WORK FILE 1 VARIABLE #LINE
+CLOSE WORK FILE 1
+*
+DEFINE SUBROUTINE REPORT
+  IF #OK
+    ADD 1 TO #PASS
+    COMPRESS 'PASS' #TXT INTO #LINE
+  ELSE
+    ADD 1 TO #FAIL
+    COMPRESS 'FAIL' #TXT INTO #LINE
+  END-IF
+  WRITE WORK FILE 1 VARIABLE #LINE
+END-SUBROUTINE
+*
+END

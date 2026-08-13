@@ -1,0 +1,170 @@
+# Change file contract — Oracle → Adabas sync (this lab)
+
+The interface between the open-systems side and the mainframe side.
+**Any change here is a breaking change.** Companion to `FLAT_FILE_CONTRACT.md`,
+which covers the opposite direction (Adabas → Oracle, the migration lab).
+
+---
+
+## Two legs, two formats
+
+| Leg | Directory | Format | Producer | Consumer |
+|---|---|---|---|---|
+| capture → mapping | `sync/outbox/batch-NNNNNN/` | **CSV** | `oracle-capture` | Hop Server |
+| mapping → apply | `sync/inbox/batch-NNNNNN/` | **fixed-width** | Hop Server | `APPLYEMP` / `APPLYVEH` |
+
+The split is deliberate (open decision O3, decided 2026-08-10). Hop reads CSV natively,
+so the capture leg keeps symmetry with the migration lab. Natural's `READ WORK FILE <structure>`
+parses **fixed-width positionally for free** — no delimiter, quoting, or
+empty-field-vs-NULL handling to get wrong in the leg that writes to the production
+database. A wrong fixed-width layout fails loudly; a mis-parsed CSV shifts a value into
+the neighbouring field and says nothing.
+
+---
+
+## Batch directory lifecycle
+
+```
+sync/outbox/batch-000042/     produced by capture
+    manifest.json             written FIRST
+    employee.csv
+    employee_address_line.csv
+    employee_language.csv
+    employee_income.csv
+    vehicle.csv
+    _COMPLETE                 written LAST
+
+sync/inbox/batch-000042/      produced by Hop (same batch number)
+    employee.dat
+    employee_address_line.dat
+    employee_language.dat
+    employee_income.dat
+    vehicle.dat
+    batch_info.dat
+    _COMPLETE                 written LAST
+
+sync/applied/batch-000042/    acknowledgement: atomic directory rename
+sync/rejected/batch-000042/   conflict or validation failure
+```
+
+Two rules make files a real queue rather than a hopeful one:
+
+1. **`_COMPLETE` is written last.** It is the commit point of the file protocol.
+   A consumer ignores any directory without it, so a half-written batch can never be read.
+2. **The producer never deletes a batch.** The consumer acknowledges by renaming the
+   directory into `applied/` or `rejected/`, which is atomic on one filesystem.
+
+Batch numbers increase monotonically and are never reused. The applier refuses any batch
+whose number is not greater than the ledger watermark, so ordering violations fail closed.
+
+---
+
+## Capture leg — CSV rules
+
+- BOM-less UTF-8, comma-delimited, one header row, RFC 4180 quoting.
+- Empty field = NULL.
+- Every parent row carries `op` (`U` = upsert full state, `D` = delete) and `tx_seq`
+  (commit order within the batch — apply ascending).
+- Child rows carry `parent_key` (the business key of the owning parent) and
+  `occurrence_index`, **renumbered 1..n contiguously**. Oracle's `LINE_NO` / `SEQ_NO`
+  may have gaps after deletes; Adabas occurrences must be dense.
+- **Child sets are complete.** For a parent with `op=U`, the child rows present in the
+  batch are *all* the occurrences. No child rows for that parent means the set is now
+  **empty** — not "unchanged".
+
+### `manifest.json`
+
+```json
+{
+  "batch"        : 42,
+  "created_utc"  : "2026-08-10T06:46:04.932Z",
+  "start_scn"    : "8591625",
+  "end_scn"      : "8591625",
+  "transactions" : 1,
+  "row_counts"   : { "employee": 1, "employee_address_line": 2,
+                     "employee_language": 3, "employee_income": 4 }
+}
+```
+
+`end_scn` becomes `LAST-SCN` in the Adabas ledger — the restart watermark.
+
+---
+
+## Apply leg — fixed-width layouts
+
+Fields are space-padded on the right (alphanumeric) or zero-padded on the left (numeric).
+No delimiters, no header row, one record per line, LF-terminated, UTF-8.
+
+### `employee.dat` — 143 bytes
+
+| Offset | Len | Field | Type | Notes |
+|---:|---:|---|---|---|
+| 1 | 1 | `op` | A | `U` or `D` |
+| 2 | 8 | `personnel_id` | A | business key; Adabas `PERSONNEL-ID` |
+| 10 | 20 | `first_name` | A | |
+| 30 | 20 | `middle_name` | A | |
+| 50 | 20 | `last_name` | A | Adabas `NAME` |
+| 70 | 8 | `birth_yyyymmdd` | A | numeric text, `MOVE EDITED … (EM=YYYYMMDD)` |
+| 78 | 1 | `gender_code` | A | `M` / `F` |
+| 79 | 1 | `mar_stat` | A | **code**, reversed from the description by Hop |
+| 80 | 6 | `dept_code` | A | |
+| 86 | 25 | `job_title` | A | |
+| 111 | 20 | `city` | A | |
+| 131 | 10 | `postal_code` | A | |
+| 141 | 3 | `country_code` | A | |
+
+For `op=D` only `op` and `personnel_id` are meaningful; the rest is space-filled.
+
+### `employee_address_line.dat` — 31 bytes  ·  MU
+
+| Offset | Len | Field | Type |
+|---:|---:|---|---|
+| 1 | 8 | `parent_key` | A |
+| 9 | 3 | `occurrence_index` | N, zero-padded |
+| 12 | 20 | `address_line` | A |
+
+### `employee_language.dat` — 14 bytes  ·  MU
+
+| Offset | Len | Field | Type |
+|---:|---:|---|---|
+| 1 | 8 | `parent_key` | A |
+| 9 | 3 | `occurrence_index` | N, zero-padded |
+| 12 | 3 | `language_code` | A |
+
+### `employee_income.dat` — 23 bytes  ·  PE
+
+| Offset | Len | Field | Type |
+|---:|---:|---|---|
+| 1 | 8 | `parent_key` | A |
+| 9 | 3 | `occurrence_index` | N, zero-padded |
+| 12 | 3 | `currency_code` | A |
+| 15 | 9 | `salary_amount` | N, zero-padded |
+
+### `batch_info.dat` — 21 bytes
+
+| Offset | Len | Field | Type |
+|---:|---:|---|---|
+| 1 | 6 | `batch_no` | N, zero-padded |
+| 7 | 15 | `end_scn` | N, zero-padded |
+
+`end_scn` is 15 digits because Oracle SCNs outgrow a 4-byte integer; the ledger field is
+packed 15 and was tested at `999999999999999` (spike S5).
+
+---
+
+## Field mapping performed by Hop (C5)
+
+The reverse of the migration lab, using the **same** `CODE_LOOKUP` table:
+
+| Concern | Direction |
+|---|---|
+| `MARITAL_STATUS` | description → code (`'Single'` → `'S'`) |
+| `BIRTH_DATE` | already `YYYYMMDD` from the capture SQL |
+| numeric padding | left-zero-pad `occurrence_index`, `salary_amount`, `batch_no`, `end_scn` |
+| string padding | right-space-pad to the layout width, truncate to Adabas field length |
+
+> **Truncation is a real risk, not a formality.** Oracle columns are wider than their
+> Adabas counterparts (`JOB_TITLE VARCHAR2(30)` vs `A25`). Hop truncates to the Adabas
+> width; anything longer would otherwise shift every following field and corrupt the
+> record silently. Test 4 in the spec's success criteria covers the MU case; a
+> long-value case belongs in round 3 alongside encoding.

@@ -1,0 +1,30 @@
+* RESETLED - clears the sync apply watermark (Adabas file 99).
+*
+* TEST SUPPORT ONLY. sync-verify.cmd runs the same batch numbers on
+* every pass, and the applier correctly refuses any batch not newer
+* than the ledger - so without this the second test run would skip
+* everything and "pass" by doing nothing.
+*
+* Never run this against a real synchronised pair: the watermark is
+* what stops already-applied batches being applied again.
+DEFINE DATA LOCAL
+1 L VIEW OF LEDGER
+  2 STREAM-ID
+1 #N (I4)
+1 #LINE (A) DYNAMIC
+END-DEFINE
+*
+DEFINE WORK FILE 5 '/sync/work/reset_result.txt' TYPE 'ASCII'
+*
+RESET #N
+FIND L WITH STREAM-ID = 'APPLY'
+  ADD 1 TO #N
+  DELETE
+END-FIND
+END TRANSACTION
+*
+COMPRESS 'LEDGER-RESET removed' #N 'record(s)' INTO #LINE
+WRITE WORK FILE 5 VARIABLE #LINE
+CLOSE WORK FILE 5
+*
+END
