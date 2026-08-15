@@ -1,4 +1,4 @@
-# this lab — Oracle → Adabas log-based synchronisation
+# Oracle → Adabas log-based synchronisation
 
 **Status:** APPROVED — implementation started 2026-08-10; **all six gating spikes PASSED**
 **Date:** 2026-08-09 (spikes recorded 2026-08-10)
@@ -263,8 +263,8 @@ Hop does what it did in the migration lab, in reverse. One pipeline per shape, d
 | Trim to Adabas field lengths | Select Values / String operations |
 | Write mainframe-facing CSV | Text File Output → `sync/inbox/batch-NNNNNN/` |
 
-> **Cold-start constraint.** the migration lab measured ~30 s Hop JVM startup. Spawning `hop-run`
-> per batch makes that the dominant latency. this lab therefore runs **Hop Server** — a
+> **Cold-start constraint.** The migration lab measured ~30 s Hop JVM startup. Spawning `hop-run`
+> per batch makes that the dominant latency. This lab therefore runs **Hop Server** — a
 > long-lived JVM with pipelines triggered over REST. If Spike S6 shows Hop Server is
 > awkward in the lab, fall back to invoking Hop once per *N* batches and accept the
 > latency, or move field mapping into the assembler.
@@ -590,8 +590,8 @@ integer, so this headroom is not theoretical).
 
 > **Finding — DDM naming.** The DDM header name must match the *object* name
 > (`LEDGER.NSD` → `DB: 000 FILE: 099 - LEDGER`), not the Adabas file name (`SYNCLEDGER`),
-> or Natural cannot catalog it: NAT0082 "Object LEDGER does not exist in library". the migration lab
-> never hit this because `VEHICLES` happened to match both. A DDM binds by file *number*.
+> or Natural cannot catalog it: NAT0082 "Object LEDGER does not exist in library". The migration
+> lab never hit this because `VEHICLES` happened to match both. A DDM binds by file *number*.
 > The header is also column-sensitive — line 3 must be a single space, and the name field
 > keeps its trailing spaces.
 
@@ -667,7 +667,7 @@ startup alone. The C5 cold-start note is now measured rather than estimated.
 > **⚠️ Pre-existing bug found and fixed (the migration lab was broken).** `hop/project-config.json`
 > had `ORACLE_HOST = 127.0.0.1`. Hop **project variables override OS environment
 > variables**, so that value silently defeated the `ORACLE_HOST=oracle` set by
-> docker-compose: every container run failed with ORA-12541. This predates this lab — it
+> docker-compose: every container run failed with ORA-12541. The bug predates this lab — it
 > came from the 2026-08-06 GUI session — and it meant `migrate.cmd` no longer worked.
 > Restored to `oracle` (host-side runs override through the `local-gui` *environment*,
 > the only layer that wins over a project default). **`migrate.cmd` verified back at
@@ -776,7 +776,7 @@ oracle-to-adabas-sync/
 | # | Question | Owner | Blocks |
 |---|---|---|---|
 | ~~O1~~ | ~~`USERNAME` populated in `V$LOGMNR_CONTENTS`?~~ | — | **✅ RESOLVED 2026-08-09 — populated *and* distinguishes originators** |
-| ~~O2~~ | ~~Conflict detection in this lab, or defer to round 3?~~ | Project owner | **✅ DECIDED 2026-08-10: defer to round 3.** this lab closes at 9/10 by intent, not by omission — see note |
+| ~~O2~~ | ~~Conflict detection in this lab, or defer to round 3?~~ | Project owner | **✅ DECIDED 2026-08-10: defer to round 3.** This lab closes at 9/10 by intent, not by omission — see note |
 | ~~O3~~ | ~~CSV or fixed-width for the mainframe-facing files?~~ | Implementation | **✅ DECIDED 2026-08-10 on evidence: fixed-width, mainframe-facing leg only.** See note below |
 | ~~O4~~ | ~~Delete policy — do Oracle deletes physically delete in Adabas?~~ | Project owner | **✅ DECIDED 2026-08-10: yes, physical `DELETE`** — a POC-scope call. See note below |
 | O5 | Which tables are *genuinely* written on both sides in production? | Design phase | `table.include.list` — dominates total effort |
@@ -784,7 +784,7 @@ oracle-to-adabas-sync/
 O5 remains the highest-leverage question in the whole Oracle to Adabas sync effort: it decides whether
 this is three aggregates or three hundred.
 
-> **O2 note — DEFERRED TO ROUND 3 (project owner, 2026-08-10).** this lab therefore closes
+> **O2 note — DEFERRED TO ROUND 3 (project owner, 2026-08-10).** This lab therefore closes
 > at **9/10 by intent**: the ten criteria stand as written, and #10 is explicitly out of
 > scope for this round rather than an unmet goal. The priority now is learning and
 > exercising each stage that *is* built — see `TESTING_GUIDE_POC2.md`.

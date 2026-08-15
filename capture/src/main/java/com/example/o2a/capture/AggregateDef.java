@@ -86,7 +86,7 @@ public final class AggregateDef {
     }
 
     // ---------------------------------------------------------------------
-    // The two this lab aggregates
+    // The two aggregates this lab syncs
     // ---------------------------------------------------------------------
 
     /** EMPLOYEES (Adabas file 11): parent + two MU groups + one PE group. */

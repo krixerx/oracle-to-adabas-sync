@@ -1,4 +1,4 @@
-# Change file contract — Oracle → Adabas sync (this lab)
+# Change file contract — Oracle → Adabas sync
 
 The interface between the open-systems side and the mainframe side.
 **Any change here is a breaking change.** Companion to `FLAT_FILE_CONTRACT.md`,
