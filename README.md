@@ -14,7 +14,7 @@ It ends with **`SYNC VERIFIED: 9/10 (1 skipped by design)`** and exit code 0. Th
 criterion is conflict detection — a documented out-of-scope item for this round, not a
 broken test. See [Why 9 and not 10](#why-9-and-not-10).
 
-> **The other direction lives in a sibling repo:** [`adabas-to-oracle-migration`](../adabas-to-oracle-migration)
+> **The other direction lives in a sibling repo:** [`adabas-to-oracle-migration`](https://github.com/krixerx/adabas-to-oracle-migration)
 > — the bulk Adabas → Oracle migration that produces the relational model this sync
 > writes back from. If you are wondering why Oracle holds an Adabas-shaped schema, that
 > repo is the answer.
