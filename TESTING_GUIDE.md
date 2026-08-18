@@ -3,8 +3,9 @@
 How to run the sync, take it apart stage by stage, watch a single change travel from an
 Oracle `COMMIT` into an Adabas record, and break it on purpose.
 
-Companion to `TESTING_GUIDE.md` (the migration lab, the other direction). Everything happens in the
-repository root — open a terminal there first.
+Companion to the `TESTING_GUIDE.md` of the sibling repo `adabas-to-oracle-migration`,
+which covers the other direction. Everything here happens in this repository's root —
+open a terminal there first.
 
 > **The one-sentence version:** Oracle writes a change to its redo log; we tail the log,
 > re-read the whole affected record from Oracle, write it to a file, let Hop rename the
@@ -28,13 +29,16 @@ Success looks like:
   PASS   1. scalar update propagates
   ...
   PASS   9. Adabas outage: changes queue and drain
-  FAIL  10. conflict detected and routed to rejected/
+  SKIP  10. conflict detected and routed to rejected/
+        out of scope this round (spec 5.4)
 
-SYNC VERIFIED: 9/10   (1 failed)
+SYNC VERIFIED: 9/10   (1 skipped by design)
 ```
 
-**9/10 is the expected, correct result.** Test 10 is conflict detection, deferred to
-round 3 by decision (spec O2). Everything built is passing.
+**9/10 is the expected, correct result, and the suite exits 0.** Criterion 10 is conflict
+detection, deferred to round 3 by decision (spec O2, design in 5.4). It is reported as
+SKIP rather than FAIL so the printed result and the exit code agree. Everything built is
+passing.
 
 ---
 
