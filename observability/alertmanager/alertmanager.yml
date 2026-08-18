@@ -1,0 +1,30 @@
+# Alertmanager for an air-gapped lab.
+#
+# Every receiver Alertmanager ships out of the box wants the internet - email,
+# Slack, PagerDuty, OpsGenie, webhooks to a SaaS. This lab has none by
+# requirement, so the notification channel is a webhook to a local file sink
+# running in the exporter container. Crude, and exactly right: it proves the
+# alert path end to end without a network, and in production the same webhook
+# points at whatever ROP already operates instead.
+
+global:
+  resolve_timeout: 2m
+
+route:
+  receiver: file-sink
+  # Group everything into one notification: with five rules there is nothing to
+  # gain from splitting, and a single line per event keeps alerts.log readable.
+  group_by: ["alertname"]
+  # Short: grouping delay is pure latency in the one criterion this stack is
+  # measured against - how long until a stopped pump becomes a line in a file.
+  group_wait: 5s
+  group_interval: 1m
+  # Re-notify hourly while a condition persists. A stopped pump that nobody has
+  # touched should keep saying so - that is the whole failure mode.
+  repeat_interval: 1h
+
+receivers:
+  - name: file-sink
+    webhook_configs:
+      - url: http://sync-exporter:9101/cgi-bin/alert
+        send_resolved: true

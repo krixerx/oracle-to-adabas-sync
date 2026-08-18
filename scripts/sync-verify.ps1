@@ -16,6 +16,10 @@ $script:Skip = 0
 $script:Results = @()
 
 $TESTKEY = 'F000000005'   # existing fine, has 2 offence codes (MU)
+# Two more existing fines, used only by test 12: they must be DIFFERENT fines,
+# because the whole point of that test is one batch carrying several parents.
+$MULTI1  = 'F000000102'
+$MULTI2  = 'F000000110'
 $NEWKEY  = 'FZZ9999999'   # synthetic, created and removed by test 2/3
 $NEWISN  = 9999999        # source_isn for the synthetic fine (UNIQUE column)
 $VEHKEY  = 'CITZZ1JZW00000014'   # a vehicle with TWO plates = two Adabas records
@@ -120,7 +124,7 @@ function Check([int]$n, [string]$name, [bool]$ok, [string]$detail) {
 }
 
 # A criterion that is deliberately out of scope for this round. It still counts
-# towards the total - the suite reports 9/10, not 9/9, because the tenth
+# towards the total - the suite reports 11/12, not 11/11, because the tenth
 # criterion exists and is knowingly unmet - but it must NOT make the run exit
 # non-zero, or the advertised result and the exit code disagree.
 function Skip([int]$n, [string]$name, [string]$detail) {
@@ -379,6 +383,44 @@ COMMIT;
          -and $v['VINFULL2'] -eq ($VEHKEY + '1') -and $v['VEHTYPE1'] -eq $before['VEHTYPE1']) `
         "n=$($v['NPLATES']) colours=$($v['COLOR1'])/$($v['COLOR2']) expiry=$($v['EXPIRY1'])/$($v['EXPIRY2']) vin2=$($v['VINFULL2']) type=$($v['VEHTYPE1'])"
 
+    # -------------------------------------------------------------- 12
+    # SEVERAL FINES IN ONE TRANSACTION - the case that was broken until
+    # 2026-08-18, found by changing a handful of amounts by hand.
+    #
+    # Both appliers used to load the batch's child work file once, into one
+    # flat array, with no record of which parent each row belonged to. That is
+    # correct for a batch carrying one aggregate, which is what every other
+    # test here produces. Give it two, and every parent got the UNION of all
+    # the children: two fines with three and one offences came out with four
+    # each, and the scalars were all correct, so nothing looked wrong.
+    #
+    # The assertion that matters is not "it synced" - it is that each fine kept
+    # ITS OWN set. Before the fix both would read COFF=4 with OFF1=SPD1.
+    Sql @"
+DELETE FROM pocapp.traffic_fine_offence
+ WHERE fine_id=(SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='$MULTI1');
+DELETE FROM pocapp.traffic_fine_offence
+ WHERE fine_id=(SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='$MULTI2');
+INSERT INTO pocapp.traffic_fine_offence (fine_id, seq_no, offence_code, offence_desc)
+ SELECT fine_id, 10, 'SPD1', 'Speeding, up to 20 km/h over the limit' FROM pocapp.traffic_fine WHERE fine_no='$MULTI1';
+INSERT INTO pocapp.traffic_fine_offence (fine_id, seq_no, offence_code, offence_desc)
+ SELECT fine_id, 20, 'PARK', 'Illegal parking' FROM pocapp.traffic_fine WHERE fine_no='$MULTI1';
+INSERT INTO pocapp.traffic_fine_offence (fine_id, seq_no, offence_code, offence_desc)
+ SELECT fine_id, 30, 'SBLT', 'Seat belt not worn' FROM pocapp.traffic_fine WHERE fine_no='$MULTI1';
+INSERT INTO pocapp.traffic_fine_offence (fine_id, seq_no, offence_code, offence_desc)
+ SELECT fine_id, 10, 'RLGT', 'Failing to stop at a red light' FROM pocapp.traffic_fine WHERE fine_no='$MULTI2';
+UPDATE pocapp.traffic_fine SET location='T12-ONE-TX' WHERE fine_no IN ('$MULTI1','$MULTI2');
+COMMIT;
+"@ | Out-Null
+    Sync-Once | Out-Null
+    $m1 = Dump $MULTI1
+    $m2 = Dump $MULTI2
+    Check 12 "several fines in one batch keep their own MU sets" `
+        ($m1['COFF'] -eq '3' -and $m1['OFF1'] -eq 'SPD1' -and $m1['OFF2'] -eq 'PARK' `
+         -and $m1['OFF3'] -eq 'SBLT' -and $m1['LOC'] -eq 'T12-ONE-TX' `
+         -and $m2['COFF'] -eq '1' -and $m2['OFF1'] -eq 'RLGT' -and $m2['LOC'] -eq 'T12-ONE-TX') `
+        "$MULTI1 COFF=$($m1['COFF']) OFF=$($m1['OFF1'])/$($m1['OFF2'])/$($m1['OFF3'])  $MULTI2 COFF=$($m2['COFF']) OFF1=$($m2['OFF1'])"
+
 } finally {
     Stop-Capture $cap
 }
@@ -396,5 +438,5 @@ if ($script:Fail -eq 0) {
 Write-Host "----------------------------------------------------------------"
 # Exit on real failures only. A skipped criterion is a known, documented gap,
 # not a broken run - if it set the exit code, sync-verify.cmd would print
-# "SYNC VERIFICATION FAILED" underneath a green 9/10.
+# "SYNC VERIFICATION FAILED" underneath a green 11/12.
 exit $(if ($script:Fail -eq 0) { 0 } else { 1 })

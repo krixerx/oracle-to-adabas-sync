@@ -12,10 +12,10 @@ polling, no commercial licences.
 The acceptance criterion is the last line of the suite:
 
 ```bat
-sync-verify.cmd     :: ends "SYNC VERIFIED: 10/11 (1 skipped by design)", exit 0
+sync-verify.cmd     :: ends "SYNC VERIFIED: 11/12 (1 skipped by design)", exit 0
 ```
 
-**10/11 is a passing run.** Criterion 10 is conflict detection — out of scope for this
+**11/12 is a passing run.** Criterion 10 is conflict detection — out of scope for this
 round *by decision*, so it reports `SKIP` and does not fail the run. Do not "fix" it into
 a failure, and do not quietly renumber the criteria to make it look like 10/10.
 
@@ -43,6 +43,19 @@ check-fine.cmd F000000005          :: one record, Oracle and Adabas side by side
 check-vehicle.cmd CITZZ1JZW00000014 :: a vehicle and all of its plate records
 :: Both are READ-ONLY reports - the sync itself is capture + pump.
 ```
+
+Watching it while it runs, and dealing with a batch that failed:
+
+```bat
+sync-monitor.cmd                   :: Prometheus + Grafana + Alertmanager + exporter
+sync-monitor.cmd stop              :: stop them; the sync is unaffected
+scripts\sync-retry.ps1             :: list rejected batches with the applier's reason
+scripts\sync-retry.ps1 -Batch batch-000007 [-Remap]
+```
+
+Grafana http://localhost:3000/d/o2a-sync — Prometheus /alerts on 9090 — raw metrics on
+9101. Alerts are appended to `sync/alerts/alerts.log`, and **that file, not the dashboard,
+is what fires when nobody is watching.** See `observability/README.md`.
 
 `sync-start.cmd` is the whole live path. The pieces it starts, if you want them
 separately:
@@ -114,6 +127,9 @@ Oracle COMMIT → redo → LogMiner → Debezium embedded   capture/  (Java)
   It is the reverse of the migration lab and uses the *same* `CODE_LOOKUP` table.
 - **Natural does semantics** — MU/PE occupancy, validation, the ledger, the ET boundary.
 - **The pump is the conveyor** — it owns ordering and the acknowledgement, nothing else.
+- **`observability/` watches, and touches nothing.** Separate compose profile, no
+  `depends_on` in either direction, `/sync` mounted **read-only**. The sync must run
+  identically with all of it stopped — that is a success criterion, not a nicety.
 
 The central simplification (decision D4): **Debezium notifies, Oracle supplies the
 payload.** A row delta means only "aggregate X changed"; `AggregateResolver` then re-reads
@@ -166,6 +182,14 @@ under the no-delete rule a plate is never renamed in place.
   child rows for a parent means the set is now *empty*, not "unchanged" — which is why
   `BatchWriter` writes every known file **header-only** when it has no rows. Omitting the
   file instead breaks every insert (a new fine may have no payments yet).
+- **Child rows belong to ONE parent, and the applier must say which.** A batch can carry
+  several aggregates - one Oracle transaction touching several fines is enough - and the
+  child work file then holds all of their rows together. Every child row carries its
+  parent key for exactly this reason; select on it before applying. Loading the file into
+  one flat array gives every parent the UNION of the batch's children, and it is silent:
+  the scalars are all correct, only the MU/PE counts are wrong. That bug shipped and
+  survived every test until 2026-08-18, because every other test produces one aggregate
+  per batch. Criterion 12 exists to keep it dead.
 - **`occurrence_index` is renumbered 1..n contiguously.** Oracle `LINE_NO`/`SEQ_NO` may
   have gaps after deletes; Adabas occurrences must be dense.
 - **The ledger is written in the same Adabas `ET` as the data change**, so "applied but
@@ -177,6 +201,16 @@ under the no-delete rule a plate is never renamed in place.
   never cost a round trip) plus compare-before-write at apply (safety — it terminates a
   loop even if the filter is misconfigured). Keep both; the no-op counter is the
   filter-leak health metric.
+- **The heartbeats are the only thing that can tell STOPPED from IDLE.** An idle pump and
+  a killed pump show the same empty queue, the same absence of errors, and the same
+  activity: none. `sync/state/{pump,capture}.heartbeat` carry an `epoch=` that the exporter
+  turns into an age, and the alert that matters most reads exactly that. Never make a
+  heartbeat conditional on there being work — one that ticks only when busy reports
+  "stopped" every time Oracle goes quiet.
+- **A rejected batch must carry its own reason.** `run-apply.sh` copies the applier's
+  result file into the batch directory *before* the acknowledgement, because `/sync/work`
+  is scratch and the next run wipes it. That copy is what answers "what failed and why"
+  without a log pipeline — three lines; don't tidy them away as a duplicate.
 
 ## The MU/PE trap
 
@@ -211,6 +245,13 @@ experiment that breaks it on purpose.
   the work-file list in `natural/run-apply.sh` + `CHANGE_FILE_CONTRACT.md`. Miss the last
   four and the data is captured and then dropped - which is why VEHICLE is defined but
   left out of `all()` and `table.include.list` until its applier exists.
+- **A metric name** -> `observability/exporter/sync-metrics.sh` + the alert rules that read
+  it (`observability/prometheus/alerts.yml`) + the dashboard panel
+  (`observability/grafana/dashboards/sync-overview.json`). A renamed metric fails silently
+  in all three: Prometheus reports no data, the panel goes blank, and **the alert simply
+  never fires** — which looks exactly like everything being fine.
+- **The applier's SUMMARY line** (`APPLYFIN.NSP`, `APPLYVEH.NSP`) -> the awk in
+  `sync-metrics.sh` that sums `stored/updated/skipped/refused|rejected` out of it.
 - **`capture/src/main/resources/capture.properties` and `capture/capture-local.properties`
   are duplicates** — the packaged default and the host-run copy. Edit both, or the jar and
   the local run diverge.
@@ -268,7 +309,17 @@ Each has a comment at the site explaining it; don't tidy the comment away.
   `sync-start.cmd` and the verify harness both wait for that. A change made in Oracle
   sooner looks like a lost change and is not one.
 - **Ports 60001, 8190, 2700, 1521, 8081** overlap the sibling lab (all but 8081). One lab
-  at a time.
+  at a time. The observability profile adds **3000, 9090, 9093, 9101**.
+- **`docker compose --profile observability up` also starts adabas, natural and oracle** -
+  compose always starts profile-less services too. `sync-monitor.cmd` therefore names the
+  four observability services explicitly, so monitoring cannot drag the databases up
+  behind it.
+- **The exporter image is `python:3-alpine`, not `alpine`, and that is not a preference.**
+  Alpine moved the busybox `httpd` applet out of the base package, so plain alpine cannot
+  serve the metrics file at all, and `apk add` would need the network on every container
+  start. The stdlib server in `observability/exporter/serve.py` is cheaper than a build.
+- **The Grafana dashboard is provisioned read-only.** Edits made in the UI are discarded on
+  restart — export the JSON to `observability/grafana/dashboards/` and commit it.
 - **Line endings are load-bearing.** `.gitattributes` keeps `.sh`/`.NSP`/`.NSD`/`.hpl` at
   LF (they run inside Linux containers; Natural source is column-sensitive) and
   `.cmd`/`.ps1` at CRLF.
@@ -280,8 +331,13 @@ Each has a comment at the site explaining it; don't tidy the comment away.
 - `specs/oracle-to-adabas-sync.md` is the design of record — decisions D1–D8, the six
   gating spikes and their results, and the open items. Check a decision there before
   reversing it; the reasoning is usually load-bearing.
-- `specs/sync-observability.md` is a **design, not built code**. Nothing in this lab
-  alerts: a halted pump is silent and stays silent. Don't cite it as a shipped feature.
+- `specs/sync-observability.md` is now **partly built** (2026-08-18). Heartbeats, the
+  exporter, Prometheus/Alertmanager/Grafana and `sync-retry.ps1` exist and are verified:
+  killing the pump puts a line in `sync/alerts/alerts.log` in ~110 s with nothing watching.
+  Still **not** built, and not to be cited as shipped: Loki (searchable failure history),
+  the JMX agent (engine metrics), and the Oracle exporter — so there is **no true
+  Oracle-to-Adabas lag figure**, only the applied SCN and the age of the last
+  acknowledgement. The spec marks every build-order step with what happened.
 - Comments here explain *why*, usually a bug paid for once. Match that density.
 - **Never commit** CE binaries, the built `capture/target/` jar, `sync/` runtime state, or
   the Oracle JDBC jar. Adabas & Natural CE are licensed for personal use and learning

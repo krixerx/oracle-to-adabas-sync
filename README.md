@@ -10,7 +10,7 @@ No message broker, no polling, no commercial licences. One command:
 sync-verify.cmd
 ```
 
-It ends with **`SYNC VERIFIED: 10/11 (1 skipped by design)`** and exit code 0. The
+It ends with **`SYNC VERIFIED: 11/12 (1 skipped by design)`** and exit code 0. The
 remaining criterion is conflict detection — a documented out-of-scope item for this
 round, not a broken test. See [Why 10 and not 11](#why-10-and-not-11).
 
@@ -130,7 +130,30 @@ fixed-width line and an Adabas record — is in [`TESTING_GUIDE.md`](TESTING_GUI
 including an experiment that breaks the MU/PE shrink on purpose so you can see the
 corruption first-hand.
 
-## Why 10 and not 11
+## Watching it
+
+```bat
+sync-monitor.cmd                 :: Grafana http://localhost:3000/d/o2a-sync
+sync-monitor.cmd stop            :: stop it; the sync carries on
+scripts\sync-retry.ps1          :: list failed batches with their reasons
+scripts\sync-retry.ps1 -Batch batch-000007
+```
+
+The sync is meant to run for a long time, and its dangerous failure is not a crash: **the
+pump halts on a failed batch and says nothing.** Halting is correct - skipping would move
+the ledger watermark past the failure and leave a permanent silent gap - but for an
+unattended service, stopped-and-quiet is indistinguishable from idle.
+
+So the pump and the capture engine write a heartbeat, an exporter turns the `sync/`
+directory tree into Prometheus metrics, and Alertmanager posts to a file sink:
+**killing the pump puts a line in `sync/alerts/alerts.log` within about 110 seconds, with
+no browser open.** That file, not the dashboard, is the deliverable. Details and the
+deliberate omissions are in [`observability/README.md`](observability/README.md).
+
+It is an observer, never a dependency: separate compose profile, no `depends_on` either
+way, and `/sync` mounted read-only, so the sync runs identically with all of it stopped.
+
+## Why 11 and not 12
 
 Criterion 10 is conflict detection: the same record changed on both sides inside one
 sync window. It is **out of scope for this round by decision, not unmet by accident**,
@@ -175,9 +198,10 @@ One-time, and they need internet. After this the lab runs fully offline.
    *directory* with that name and Hop Server would fail obscurely.
    → https://www.oracle.com/database/technologies/appdev/jdbc-downloads.html
 
-⚠️ **Ports.** This lab publishes **60001, 8190, 2700, 1521, 8081**. The sibling
-`adabas-to-oracle-migration` repo publishes all of those except 8081. **Stop one lab
-before starting the other** — they are designed to run one at a time.
+⚠️ **Ports.** This lab publishes **60001, 8190, 2700, 1521, 8081**, plus
+**3000, 9090, 9093, 9101** when the observability profile is up. The sibling
+`adabas-to-oracle-migration` repo publishes all of the first group except 8081. **Stop one
+lab before starting the other** — they are designed to run one at a time.
 
 ⚠️ **Disk.** `setup-cdc.ps1` puts Oracle into `ARCHIVELOG` mode. There is no `rman` in
 `gvenzl/oracle-free:23-slim`, so archive logs go to a plain directory rather than the
@@ -187,8 +211,9 @@ the disk.
 ## Layout
 
 ```
-sync-verify.cmd              the acceptance suite (10 criteria)
+sync-verify.cmd              the acceptance suite (12 criteria)
 sync-start.cmd               start capture + pump for interactive use
+sync-monitor.cmd             start/stop the monitoring stack (Prometheus + Grafana)
 check-fine.cmd               show one fine in Oracle and Adabas side by side
 check-vehicle.cmd            same for a vehicle: attributes plus every plate record
 docker-compose.yml           adabas, natural, oracle, hop-server
@@ -198,7 +223,8 @@ oracle-init/                 schema, lookups, CDC setup, post-migration seed
 capture/                     Java: Debezium embedded engine, assembler, batch writer
 hop/pipelines/               60 fine · 70 offences (MU) · 71 payments (PE)  (reverse mapping)
 natural/                     APPLYFIN (apply API) · DUMPFIN (assertions) · SEED* (Adabas source state) · LEDGER · SPIKE* demos
-scripts/                     setup-cdc · setup-adabas-ledger · seed-source · sync-pump · sync-verify · lab-up
+scripts/                     setup-cdc · setup-adabas-ledger · seed-source · sync-pump · sync-retry · sync-verify · lab-up
+observability/               exporter · Prometheus rules · Alertmanager · provisioned Grafana dashboard
 sync/                        outbox / inbox / applied / rejected (gitignored)
 ```
 

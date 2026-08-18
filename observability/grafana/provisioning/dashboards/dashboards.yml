@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: o2a
+    type: file
+    # The dashboard is a file in this repo, so it is reviewed and versioned like
+    # the rest of the lab. Edits made in the Grafana UI are NOT written back -
+    # export the JSON and commit it, or the next container start discards them.
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

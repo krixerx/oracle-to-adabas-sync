@@ -1,0 +1,13 @@
+# Provisioned so the stack comes up already usable: no clicking through a setup
+# wizard, and the dashboard's datasource uid is stable across a rebuild.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: o2a-prom
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s

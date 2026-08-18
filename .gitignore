@@ -13,6 +13,7 @@ sync/applied/
 sync/rejected/
 sync/work/
 sync/state/
+sync/alerts/
 
 # spike scratch output
 data/*.txt

@@ -1,0 +1,36 @@
+# Prometheus for the Oracle -> Adabas sync lab.
+#
+# Two scrape targets and one rule file. Everything interesting comes from
+# sync-exporter, which turns the sync/ directory tree into metrics; Prometheus
+# itself is scraped only so "is the monitoring alive" is answerable from inside
+# the monitoring.
+
+global:
+  # 10s keeps scrape granularity a small term in the stall alert's budget
+  # (75s threshold + 15s for + grouping), and a directory walk over applied/
+  # is cheap enough that this costs nothing.
+  scrape_interval: 10s
+  evaluation_interval: 10s
+  external_labels:
+    lab: o2a
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: sync
+    # The exporter is a static file served by busybox httpd, not a /metrics
+    # endpoint - see observability/exporter/sync-metrics.sh for why there is no
+    # node_exporter here.
+    metrics_path: /sync.prom
+    static_configs:
+      - targets: ["sync-exporter:9101"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -38,6 +38,8 @@ public final class CaptureMain {
         Path outbox = Path.of(cfg.get("batch.outbox.dir", "./sync/outbox"));
         long flushMs = cfg.getInt("batch.flush.interval.ms", 5000);
         String filterUser = cfg.get("originator.filter.user", "SYNCAPP");
+        Path heartbeat = Path.of(cfg.get("heartbeat.file", "./sync/state/capture.heartbeat"));
+        long heartbeatMs = cfg.getInt("heartbeat.interval.ms", 5000);
 
         System.out.println("=== Oracle to Adabas sync - Oracle capture ===");
         System.out.println("  source     : " + props.getProperty("database.hostname")
@@ -85,6 +87,27 @@ public final class CaptureMain {
             ExecutorService engineExec = Executors.newSingleThreadExecutor();
             engineExec.execute(engine);
 
+            // The heartbeat. Nothing else can tell a STOPPED capture from an idle
+            // one: no events and no batches is the normal state of a quiet
+            // database, and it is also exactly what a dead process looks like.
+            // A file whose epoch stops advancing is the only difference, and it
+            // is what the stall alert reads (see specs/sync-observability.md).
+            //
+            // Deliberately NOT written from the Debezium callback: that thread
+            // only runs when there are events, so a heartbeat driven by it would
+            // report "stopped" every time Oracle went quiet. It has to tick on a
+            // timer of its own, independent of the workload.
+            ExecutorService beat = Executors.newSingleThreadScheduledExecutor();
+            ((java.util.concurrent.ScheduledExecutorService) beat).scheduleWithFixedDelay(() -> {
+                try {
+                    writeHeartbeat(heartbeat, assembler, writer);
+                } catch (Exception e) {
+                    // Never let the observer break the observed: a heartbeat that
+                    // cannot be written is a monitoring problem, not a sync one.
+                    System.err.println("!! heartbeat failed: " + e);
+                }
+            }, 0, heartbeatMs, TimeUnit.MILLISECONDS);
+
             ExecutorService flusher = Executors.newSingleThreadScheduledExecutor();
             ((java.util.concurrent.ScheduledExecutorService) flusher).scheduleWithFixedDelay(() -> {
                 try {
@@ -114,6 +137,7 @@ public final class CaptureMain {
             }
 
             // Final flush so a clean stop does not strand buffered changes.
+            beat.shutdownNow();
             flusher.shutdown();
             flusher.awaitTermination(30, TimeUnit.SECONDS);
             flush(assembler, writer, lock);
@@ -130,6 +154,37 @@ public final class CaptureMain {
                     + assembler.filteredEchoCount()
                     + ", events on unmapped tables: " + assembler.unmappedTableCount());
         }
+    }
+
+    /**
+     * One line per key, same shape as the pump's heartbeat, so the exporter has
+     * a single parser. Written whole and not appended: a reader that catches a
+     * partial file would parse a stale epoch and mis-report the age.
+     */
+    private static void writeHeartbeat(Path file, Assembler assembler, BatchWriter writer)
+            throws java.io.IOException {
+        java.nio.file.Path parent = file.getParent();
+        if (parent != null) {
+            java.nio.file.Files.createDirectories(parent);
+        }
+        java.time.Instant now = java.time.Instant.now();
+        // LF, explicitly - NOT System.lineSeparator(). This file is written by a
+        // JVM on the Windows host and parsed by a busybox shell inside a
+        // container, where a trailing CR turns "epoch=1755..." into something
+        // shell arithmetic cannot subtract, and the age silently disappears.
+        String eol = String.valueOf((char) 10);
+        String body = String.join(eol,
+                "epoch=" + now.getEpochSecond(),
+                "iso=" + now,
+                "role=capture",
+                "status=running",
+                "next_batch=" + writer.peekNextBatchNumber(),
+                // The filter-leak health metric: in steady state this counts the
+                // sync's own writes being dropped before they can loop back.
+                "echoes_filtered=" + assembler.filteredEchoCount(),
+                "unmapped_events=" + assembler.unmappedTableCount(),
+                "");
+        java.nio.file.Files.writeString(file, body, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     private static void flush(Assembler assembler, BatchWriter writer, Object lock)

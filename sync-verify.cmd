@@ -1,9 +1,9 @@
 @echo off
-REM Acceptance suite: runs the ten success criteria from the spec and prints
+REM Acceptance suite: runs the success criteria from the spec and prints
 REM "SYNC VERIFIED: n/n". Companion to the sibling repo's migrate.cmd.
 REM
 REM Criterion 10 (conflict detection) is SKIPPED by design - it is a documented
-REM out-of-scope item, not a broken run - so a healthy run reports 9/10 and
+REM out-of-scope item, not a broken run - so a healthy run reports 11/12 and
 REM exits 0.
 REM
 REM One-time prerequisites, in this order, before the first run ever:

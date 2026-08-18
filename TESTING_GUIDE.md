@@ -33,10 +33,10 @@ Success looks like:
         out of scope this round (spec 5.4)
   PASS  11. vehicle: attribute hits every plate record, expiry one
 
-SYNC VERIFIED: 10/11   (1 skipped by design)
+SYNC VERIFIED: 11/12   (1 skipped by design)
 ```
 
-**10/11 is the expected, correct result, and the suite exits 0.** Criterion 10 is conflict
+**11/12 is the expected, correct result, and the suite exits 0.** Criterion 10 is conflict
 detection, deferred to round 3 by decision (spec O2, design in 5.4). It is reported as
 SKIP rather than FAIL so the printed result and the exit code agree. Everything built is
 passing.
@@ -197,7 +197,7 @@ That is the demo worth showing people.
 
 | Path | What it is | When you touch it |
 |---|---|---|
-| `sync-verify.cmd` | The acceptance suite (ten criteria) | Every run |
+| `sync-verify.cmd` | The acceptance suite (twelve criteria) | Every run |
 | `scripts\sync-verify.ps1` | The tests themselves — readable, one block each | To add a test |
 | `scripts\sync-pump.ps1` | Drives batches: map → apply → acknowledge | To change orchestration |
 | `scripts\make-batch-info.ps1` | Writes `batch_info.dat` + `_COMPLETE` for a hand-run batch | Only when running stages by hand |
@@ -315,7 +315,38 @@ each). You now have three batches. Delete the *middle* one from `sync\outbox\` a
 pump: it applies the first, then halts at the gap rather than skipping ahead — because
 applying batch 3 would move the watermark past batch 2 forever.
 
-**g) Add a field to the sync.** `TRAFFIC_FINE.OFFENDER_NATIONAL_ID` is already carried; try adding
+**g) Kill the pump and walk away.** The point of the monitoring, in one experiment.
+```bat
+sync-monitor.cmd                        :: Grafana http://localhost:3000/d/o2a-sync
+scripts\sync-pump.ps1 -Watch            :: leave it running for a minute
+```
+Then close that window, note the time, and **stop looking at the screen**. A line appears
+in `sync\alerts\alerts.log` about 110 seconds later:
+```
+2026-08-18T12:33:32Z  FIRING    SyncPumpStopped   The pump is not running - nothing is being applied to Adabas
+```
+Nothing was watching. That is the whole argument: the pump halts safely and says nothing,
+and safe-but-silent is the dangerous state for something meant to run for years. Compare
+the two panels while you wait — "Pump" counts up in seconds, "Pending" starts climbing as
+capture keeps queueing work the pump is no longer draining.
+
+Worth doing the negative case too: leave the pump running and watch the same panels do
+nothing for five minutes. An idle pump and a dead one differ *only* in the heartbeat.
+
+**h) Reject a batch and retry it.** Combine (f) with the dashboard. Break a batch — the
+easiest way is to stop Adabas (`docker stop o2a-adabas`) while the pump is applying — and
+watch it land in `sync\rejected\`. The dashboard's **Rejected batches** table names the
+batch and the reason, taken from the `apply_result.txt` that travelled with it. Then:
+```bat
+docker start o2a-adabas
+scripts\sync-retry.ps1                          :: lists it, with the reason
+scripts\sync-retry.ps1 -Batch batch-00000N
+```
+Try retrying the *wrong* batch — a later one, while an earlier one is still rejected. The
+script refuses. Skipping is the one operation this design must never perform, and the
+refusal is the guard rail, not the operator's memory.
+
+**i) Add a field to the sync.** `TRAFFIC_FINE.OFFENDER_NATIONAL_ID` is already carried; try adding
 something not currently mapped. You'll touch all four layers: `AggregateDef` (SQL +
 column list), the contract layout, the Hop pipeline (input field + output field with a
 width), and `APPLYFIN` (record layout + `MOVE-FIELDS` + `COMPARE-RECORD`). Doing this once
@@ -389,7 +420,7 @@ lab dies quietly.
 
 ## 10. Suggested plan for a session
 
-1. `sync-verify.cmd` once — see `SYNC VERIFIED: 10/11` end to end (~8 min).
+1. `sync-verify.cmd` once — see `SYNC VERIFIED: 11/12` end to end (~8 min).
 2. Work through §2 stage by stage on one change. This is the core of the learning: you
    see the same record as CSV, as fixed-width, and as an Adabas record.
 3. Run capture + `sync-pump.ps1 -Watch` and type a few `UPDATE`s. Watch the latency.

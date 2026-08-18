@@ -82,6 +82,23 @@ fi
 [ -f /sync/work/apply_result_veh.txt ] && cat /sync/work/apply_result_veh.txt
 cat /sync/work/apply_result.txt
 
+# NOTE - why the verdict is NOT copied into $INBOX here.
+#
+# The observability work needs the applier's result to travel WITH the batch:
+# /sync/work is scratch and the next run wipes it, so a rejected batch would
+# otherwise arrive in rejected/ with no explanation attached.
+#
+# The obvious place to copy it is right here - and it does not work. The batch
+# directory was created by the HOP container, which runs as uid 501; this
+# container runs as sagadmin, and the directory is mode 755. So `cp` into it
+# fails with EACCES. (Different failure from the rename restriction, same
+# origin: several containers and a Windows bind mount sharing one tree.)
+#
+# So sync-pump.ps1 writes the result file from the host instead, out of this
+# script's stdout - which is strictly better anyway, because stdout also carries
+# the Natural screen dump when the apply CRASHES rather than merely refusing,
+# and that is exactly the case where somebody needs the reason.
+
 # A refusal is a deliberate outcome, not a crash: APPLYVEH reports it and
 # keeps going so the ledger still moves. The exit code is set HERE, and it
 # is what sends the batch to rejected/ and halts the pump.

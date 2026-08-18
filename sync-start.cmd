@@ -43,6 +43,9 @@ echo    COMMIT;
 echo.
 echo  Then check Adabas (5-10 seconds later):
 echo    check-fine.cmd F000000005
+echo.
+echo  To watch it rather than read it - and to be told when it stops:
+echo    sync-monitor.cmd     (Grafana http://localhost:3000/d/o2a-sync)
 echo ----------------------------------------------------------------
 endlocal
 exit /b 0

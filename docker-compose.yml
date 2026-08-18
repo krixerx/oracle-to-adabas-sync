@@ -111,9 +111,114 @@ services:
       start_period: 40s
     networks: [o2a]
 
+  # ---------------------------------------------------------------------------
+  # Observability (profile: observability) - see observability/README.md
+  #
+  # AN OBSERVER, NEVER A DEPENDENCY. The sync must run correctly with every
+  # service below stopped, so none of them is in the `sync` profile and nothing
+  # in the sync path depends on them. The only coupling in the other direction
+  # is the read-only /sync mount.
+  # ---------------------------------------------------------------------------
+
+  # Turns the sync/ directory tree into Prometheus metrics, and receives
+  # Alertmanager's webhook. Pulled, never built: python:3-alpine gives busybox
+  # for the directory walk and a stdlib HTTP server for the two endpoints.
+  # (Plain alpine cannot: it no longer ships the busybox httpd applet, and
+  # installing it would need the network on every container start.)
+  sync-exporter:
+    image: python:3.13-alpine
+    container_name: o2a-sync-exporter
+    profiles: ["observability"]
+    command: ["sh", "/opt/sync-exporter/entrypoint.sh"]
+    environment:
+      SYNC_DIR: /sync
+      BUILD_INTERVAL: "5"   # a term in the stall-alert budget, and a cheap one
+      HTTP_PORT: "9101"
+    volumes:
+      - ./observability/exporter:/opt/sync-exporter:ro
+      # READ-ONLY, deliberately. A process that cannot rename a batch directory
+      # can never damage the queue it is watching - and it sidesteps the Windows
+      # bind-mount rename restriction that shaped the rest of this design.
+      - ./sync:/sync:ro
+      # The one thing it writes, and nothing in the sync path reads it.
+      - ./sync/alerts:/alerts
+    ports:
+      - "9101:9101"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9101/sync.prom || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [o2a]
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    container_name: o2a-prometheus
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # A lab that is left running for weeks should not quietly grow without
+      # limit - the archive logs already do enough of that.
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [o2a]
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    container_name: o2a-alertmanager
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./observability/alertmanager:/etc/alertmanager:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "9093:9093"
+    networks: [o2a]
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: o2a-grafana
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Anonymous viewing so the dashboard is one click from the README with no
+      # login step. Editing still requires the admin account.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: dark
+      # OFFLINE. Every one of these reaches the internet by default, and this lab
+      # is air-gapped by requirement - the whole project exists because the real
+      # deployment has no internet either. Turn them off explicitly rather than
+      # relying on the network being absent.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on: [prometheus]
+    networks: [o2a]
+
 volumes:
   adabas-data:
   oracle-data:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
 
 networks:
   o2a:

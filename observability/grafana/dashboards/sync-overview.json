@@ -1,0 +1,398 @@
+{
+  "uid": "o2a-sync",
+  "title": "Oracle to Adabas sync",
+  "description": "Is it moving, what failed, and why. Provisioned from observability/grafana/dashboards/sync-overview.json - UI edits are not saved back.",
+  "tags": ["o2a", "sync"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Is it alive",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Pump",
+      "description": "Seconds since the pump last reported alive. This is the panel that distinguishes STOPPED from IDLE - no other signal can, because an idle pump and a killed pump look identical everywhere else.",
+      "datasource": { "type": "prometheus", "uid": "o2a-prom" },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "sync_pump_heartbeat_age_seconds", "legendFormat": "last beat" }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "never started",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 30 },
+              { "color": "red", "value": 75 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Capture",
+      "description": "Seconds since the Debezium capture engine last reported alive.",
+      "datasource": { "type": "prometheus", "uid": "o2a-prom" },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "sync_capture_heartbeat_age_seconds", "legendFormat": "last beat" }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "never started",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 30 },
+              { "color": "red", "value": 75 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Pump state",
+      "description": "The pump halts on the first failed batch rather than skipping it, because skipping would move the ledger watermark past the failure and that batch could then never be applied. Halted is safe. Halted and unnoticed is not.",
+      "datasource": { "type": "prometheus", "uid": "o2a-prom" },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "sync_pump_halted", "legendFormat": "state" }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no data",
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "RUNNING", "color": "green", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "HALTED", "color": "red", "index": 1 } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Pending",
+      "description": "Batches captured from Oracle but not yet applied to Adabas (outbox + inbox).",
+      "datasource": { "type": "prometheus", "uid": "o2a-prom" },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "sync_batches_pending", "legendFormat": "pending" }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 5 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Rejected",
+      "description": "Batches that failed to apply and are waiting for a retry. Retry is always safe here: compare-before-write makes a re-apply a no-op and the ledger refuses anything already applied.",
+      "datasource": { "type": "prometheus", "uid": "o2a-prom" },
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "sync_batches_rejected", "legendFormat": "rejected" }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Applied batches",
+      "datasource": { "type": "prometheus", "uid": "o2a-prom" },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "sync_batches_applied_total", "legendFormat": "applied" }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "none",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "text" } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "How much has synchronised",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "bargauge",
+      "title": "Records applied, by outcome",
+      "description": "skipped = compare-before-write found Adabas already holding the value. In steady state that is the loop-prevention leak metric and should sit near zero. refused = the applier declined the change on business grounds, e.g. a delete.",
+      "datasource": { "type": "prometheus", "uid": "o2a-prom" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 7 },
+      "targets": [
+        { "refId": "A", "expr": "sync_records_applied_total", "legendFormat": "{{outcome}}" }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "refused" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
+          }
+        ]
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Watermark",
+      "description": "The newest batch acknowledged by Adabas, the Oracle SCN it carried, and how long ago that was. The SCN is the number to compare against Oracle's CURRENT_SCN when a real lag figure is wanted.",
+      "datasource": { "type": "prometheus", "uid": "o2a-prom" },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 7 },
+      "targets": [
+        { "refId": "A", "expr": "sync_last_applied_batch", "legendFormat": "batch", "instant": true },
+        { "refId": "B", "expr": "sync_last_applied_scn", "legendFormat": "SCN", "instant": true },
+        { "refId": "C", "expr": "time() - sync_last_applied_timestamp_seconds", "legendFormat": "ago", "instant": true }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": { "mode": "fixed", "fixedColor": "text" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "ago" },
+            "properties": [{ "id": "unit", "value": "s" }]
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "title": "Firing alerts",
+      "description": "Prometheus alert state, read straight from the ALERTS series - so this shows exactly what Alertmanager was told, and what landed in sync/alerts/alerts.log.",
+      "datasource": { "type": "prometheus", "uid": "o2a-prom" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 7 },
+      "targets": [
+        { "refId": "A", "expr": "ALERTS{alertstate=\"firing\"}", "instant": true, "format": "table" }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "alertstate": true,
+              "instance": true,
+              "job": true,
+              "lab": true
+            },
+            "renameByName": { "alertname": "alert", "severity": "severity", "component": "component" }
+          }
+        }
+      ],
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": { "custom": { "align": "left" } }, "overrides": [] }
+    },
+    {
+      "type": "row",
+      "title": "Is it moving",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue depth",
+      "description": "A flat non-zero pending line is the shape to worry about: work waiting and nothing draining. That is what the SyncQueueNotDraining rule watches for.",
+      "datasource": { "type": "prometheus", "uid": "o2a-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        { "refId": "A", "expr": "sync_batches_outbox", "legendFormat": "outbox (awaiting mapping)" },
+        { "refId": "B", "expr": "sync_batches_inbox", "legendFormat": "inbox (awaiting apply)" },
+        { "refId": "C", "expr": "sync_batches_rejected", "legendFormat": "rejected" }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "rejected" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Throughput",
+      "description": "Records reaching Adabas per five minutes, by outcome.",
+      "datasource": { "type": "prometheus", "uid": "o2a-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        { "refId": "A", "expr": "increase(sync_records_applied_total[5m])", "legendFormat": "{{outcome}}" }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "stacking": { "mode": "normal", "group": "A" }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "What failed, and why",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Rejected batches",
+      "description": "The reason travels with the batch: the pump writes the applier's output into the batch directory before it is acknowledged, so a rejected batch carries its own explanation. Retry one with: scripts\\sync-retry.ps1 -Batch <batch>",
+      "datasource": { "type": "prometheus", "uid": "o2a-prom" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 23 },
+      "targets": [
+        { "refId": "A", "expr": "sync_batch_rejected", "instant": true, "format": "table" }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "lab": true
+            },
+            "indexByName": { "batch": 0, "reason": 1 },
+            "renameByName": { "batch": "batch", "reason": "reason given by the applier" }
+          }
+        }
+      ],
+      "options": { "showHeader": true },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "left" }, "noValue": "nothing rejected" },
+        "overrides": []
+      }
+    }
+  ]
+}

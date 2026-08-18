@@ -16,6 +16,8 @@
 
 # Consumed inside the Linux containers - must stay LF.
 *.sh   text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
 
 # Natural sources and Adabas file definitions are read by tools in the
 # containers, and Natural source is column-sensitive - do not let anything

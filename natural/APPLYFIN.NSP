@@ -87,6 +87,28 @@ DEFINE DATA LOCAL
   2 #BATCH-NO (N6)
   2 #END-SCN  (N15)
 *
+* Two tiers, and the distinction is the whole point of this section.
+*
+* The #...-ALL arrays hold EVERY child row in the batch, each still carrying
+* the fine number it belongs to. The short arrays hold the children of the ONE
+* fine currently being applied, and they are what COMPARE-RECORD and
+* MOVE-FIELDS read - so those two see exactly one aggregate, as they always
+* assumed they did.
+*
+* Before 2026-08-18 there was only the short tier, filled once per batch. With
+* one fine per batch that is correct and it is what every test exercised. With
+* several - one Oracle transaction touching several fines - every fine got the
+* UNION of all the batch's offences and payments, silently: six fines came out
+* with COFF=12 apiece. Scalars were right, so nothing looked wrong.
+1 #OFF-KEYS (A10/1:2000)
+1 #OFF-VALS (A4/1:2000)
+1 #OFF-TOT  (I4)
+1 #PAY-KEYS (A10/1:2000)
+1 #PAY-DALL (N8/1:2000)
+1 #PAY-AALL (P7.2/1:2000)
+1 #PAY-MALL (A2/1:2000)
+1 #PAY-TOT  (I4)
+*
 1 #OFF      (A4/1:20)
 1 #OFF-CNT  (I4)
 1 #PDATE    (N8/1:20)
@@ -105,6 +127,9 @@ DEFINE DATA LOCAL
 1 #LEDGER-FOUND (L)
 1 #SKIP        (L)
 1 #FROM        (I4)
+1 #J           (I4)
+1 #TOO-MANY    (L)
+1 #OVERFLOW    (L)
 END-DEFINE
 *
 DEFINE WORK FILE 6 '/sync/work/batch_info.dat' TYPE 'ASCII'
@@ -205,6 +230,19 @@ END-SUBROUTINE
 *
 * ====================================================================
 DEFINE SUBROUTINE APPLY-UPSERT
+* FIRST, always: the compare and the move both read the short arrays, so they
+* have to hold THIS fine's children and nobody else's.
+  PERFORM SELECT-CHILDREN
+  IF #TOO-MANY
+*   Refuse rather than truncate. Twenty is the MU/PE limit in the FDT, and a
+*   silently shortened set is the failure this whole program exists to avoid.
+    ADD 1 TO #CNT-REJECT
+    COMPRESS 'REJECTED-TOO-MANY-CHILD-ROWS' #FINE-NO
+      '- more than the 20 occurrences Adabas holds, or the batch exceeded'
+      'the 2000-row load limit' INTO #LINE
+    WRITE WORK FILE 5 VARIABLE #LINE
+    ESCAPE ROUTINE
+  END-IF
   RESET #FOUND #SAME
   FIND V WITH FINE-NO = #FINE-NO
     #FOUND := TRUE
@@ -319,20 +357,70 @@ DEFINE SUBROUTINE MOVE-FIELDS
 END-SUBROUTINE
 *
 * ====================================================================
-* Batches in this POC carry one aggregate at a time, so the child sets
-* are loaded once into arrays rather than re-read per parent.
+* The whole batch's children, read once, each keeping the fine number it
+* belongs to. Read once because a work file cannot be rewound per parent
+* without closing and reopening it, which would be O(parents x children)
+* file reads for no gain.
 DEFINE SUBROUTINE LOAD-CHILDREN
-  RESET #OFF-CNT #PAY-CNT
+  RESET #OFF-TOT #PAY-TOT #OVERFLOW
   RD2. READ WORK FILE 2 #OFF-REC
-    ADD 1 TO #OFF-CNT
-    #OFF(#OFF-CNT) := #OFF-VAL
+    IF #OFF-TOT LT 2000
+      ADD 1 TO #OFF-TOT
+      #OFF-KEYS(#OFF-TOT) := #OFF-KEY
+      #OFF-VALS(#OFF-TOT) := #OFF-VAL
+    ELSE
+*     Never write past the array: overflow is turned into a refusal below,
+*     because quietly dropping child rows is exactly the silent corruption
+*     this program is built to prevent.
+      #OVERFLOW := TRUE
+    END-IF
   END-WORK
   RD3. READ WORK FILE 3 #PAY-REC
-    ADD 1 TO #PAY-CNT
-    #PDATE(#PAY-CNT) := VAL(#PAY-DATE8)
-    #PAMT(#PAY-CNT)  := VAL(#PAY-AMT8)
-    #PMETH(#PAY-CNT) := #PAY-METH
+    IF #PAY-TOT LT 2000
+      ADD 1 TO #PAY-TOT
+      #PAY-KEYS(#PAY-TOT) := #PAY-KEY
+      #PAY-DALL(#PAY-TOT) := VAL(#PAY-DATE8)
+      #PAY-AALL(#PAY-TOT) := VAL(#PAY-AMT8)
+      #PAY-MALL(#PAY-TOT) := #PAY-METH
+    ELSE
+      #OVERFLOW := TRUE
+    END-IF
   END-WORK
+END-SUBROUTINE
+*
+* ====================================================================
+* The children of ONE fine, in file order, renumbered 1..n.
+*
+* File order is the occurrence order: the capture side already renumbered
+* occurrence_index contiguously from Oracle's gapped LINE_NO/SEQ_NO, because
+* Adabas occurrences must be dense. Nothing here may reorder them.
+DEFINE SUBROUTINE SELECT-CHILDREN
+  RESET #OFF-CNT #PAY-CNT #TOO-MANY
+  IF #OVERFLOW
+    #TOO-MANY := TRUE
+  END-IF
+  FOR #J = 1 TO #OFF-TOT
+    IF #OFF-KEYS(#J) EQ #FINE-NO
+      IF #OFF-CNT LT 20
+        ADD 1 TO #OFF-CNT
+        #OFF(#OFF-CNT) := #OFF-VALS(#J)
+      ELSE
+        #TOO-MANY := TRUE
+      END-IF
+    END-IF
+  END-FOR
+  FOR #J = 1 TO #PAY-TOT
+    IF #PAY-KEYS(#J) EQ #FINE-NO
+      IF #PAY-CNT LT 20
+        ADD 1 TO #PAY-CNT
+        #PDATE(#PAY-CNT) := #PAY-DALL(#J)
+        #PAMT(#PAY-CNT)  := #PAY-AALL(#J)
+        #PMETH(#PAY-CNT) := #PAY-MALL(#J)
+      ELSE
+        #TOO-MANY := TRUE
+      END-IF
+    END-IF
+  END-FOR
 END-SUBROUTINE
 *
 END

@@ -85,10 +85,20 @@ DEFINE DATA LOCAL
   2 #BATCH-NO (N6)
   2 #END-SCN  (N15)
 *
-1 #PLT-NO-A   (A15/1:3)
-1 #PLT-ISN-A  (N10/1:3)
-1 #PLT-EXP-A  (N8/1:3)
+* EVERY plate row in the batch, each keeping the VIN it belongs to.
+*
+* It used to be three entries with no key, on the assumption that a batch
+* carries one vehicle - true of every test, false of one Oracle transaction
+* touching several vehicles. Two consequences, both silent: each vehicle got
+* the union of all the batch's plates, and a fourth plate row wrote past the
+* end of the array.
+1 #PLT-KEY-A  (A17/1:600)
+1 #PLT-NO-A   (A15/1:600)
+1 #PLT-ISN-A  (N10/1:600)
+1 #PLT-EXP-A  (N8/1:600)
 1 #PLT-CNT    (I4)
+1 #PLT-SEEN   (I4)
+1 #OVERFLOW   (L)
 *
 1 #LINE        (A) DYNAMIC
 1 #I           (I4)
@@ -169,7 +179,22 @@ END-SUBROUTINE
 * ====================================================================
 * One Oracle vehicle = every Adabas record whose plate row names it.
 DEFINE SUBROUTINE APPLY-VEHICLE
+  RESET #PLT-SEEN
+  IF #OVERFLOW
+    ADD 1 TO #CNT-REJECT
+    COMPRESS 'REJECTED-TOO-MANY-PLATE-ROWS' #VIN
+      '- the batch exceeded the 600-row load limit' INTO #LINE
+    WRITE WORK FILE 5 VARIABLE #LINE
+    ESCAPE ROUTINE
+  END-IF
   FOR #I = 1 TO #PLT-CNT
+*   The batch may carry several vehicles. Only the plate rows naming THIS
+*   one are ours; skipping the rest is what keeps one vehicle's plates out
+*   of another's record.
+    IF #PLT-KEY-A(#I) NE #VIN
+      ESCAPE TOP
+    END-IF
+    ADD 1 TO #PLT-SEEN
     RESET #FOUND
 *   MATCHED ON THE PLATE NUMBER, NOT THE ISN - a correction, not a
 *   shortcut.
@@ -278,12 +303,19 @@ END-SUBROUTINE
 *
 * ====================================================================
 DEFINE SUBROUTINE LOAD-PLATES
-  RESET #PLT-CNT
+  RESET #PLT-CNT #OVERFLOW
   RD2. READ WORK FILE 2 #PLT-REC
-    ADD 1 TO #PLT-CNT
-    #PLT-NO-A(#PLT-CNT)  := #PLT-NO
-    #PLT-ISN-A(#PLT-CNT) := #PLT-ISN
-    #PLT-EXP-A(#PLT-CNT) := #PLT-EXP8
+    IF #PLT-CNT LT 600
+      ADD 1 TO #PLT-CNT
+      #PLT-KEY-A(#PLT-CNT) := #PLT-KEY
+      #PLT-NO-A(#PLT-CNT)  := #PLT-NO
+      #PLT-ISN-A(#PLT-CNT) := #PLT-ISN
+      #PLT-EXP-A(#PLT-CNT) := #PLT-EXP8
+    ELSE
+*     Refused rather than truncated - see APPLY-VEHICLE. Dropping a plate row
+*     would delete a registration from the target without anyone asking.
+      #OVERFLOW := TRUE
+    END-IF
   END-WORK
 END-SUBROUTINE
 *

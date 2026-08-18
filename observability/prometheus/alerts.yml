@@ -1,0 +1,132 @@
+# The actual deliverable of the observability round.
+#
+# The dashboard is the pleasant part; these five rules are the part that earns
+# its keep, because they work when nobody is looking at the dashboard.
+#
+# READ THIS BEFORE TUNING ANYTHING: the failure this system has is not a crash.
+# The pump halts on a failed batch by design - it must, because skipping one
+# would move the ledger watermark past it and that batch could then never be
+# applied. Halting is correct. Halting SILENTLY is the defect. Every rule below
+# exists to make a stopped-but-safe sync loud.
+
+groups:
+  - name: sync-liveness
+    rules:
+      # The most important rule in this file.
+      #
+      # An idle pump and a killed pump look identical from every other angle:
+      # empty queue, no activity, no errors. Only the heartbeat separates them.
+      #
+      # THE NUMBERS. 75s + 15s, plus 10s of Alertmanager grouping and a 10s
+      # scrape, lands the notification a little over 90 seconds after the pump
+      # stops - inside the spec's two-minute criterion with room for a slow
+      # rebuild. The floor on the threshold is the longest LEGITIMATE gap
+      # between beats, which is one batch's apply time: seconds normally, and if
+      # a single batch ever does take 75 seconds that is worth an alert too.
+      #
+      # It does NOT fire on a lab that has never run the pump: the exporter emits
+      # this series only once the heartbeat file exists.
+      - alert: SyncPumpStopped
+        expr: sync_pump_heartbeat_age_seconds > 75
+        for: 15s
+        labels:
+          severity: critical
+          component: pump
+        annotations:
+          summary: "The pump is not running - nothing is being applied to Adabas"
+          description: >-
+            No heartbeat for {{ $value | humanizeDuration }}. Oracle changes are still
+            being captured into sync/outbox, so nothing is lost, but Adabas is falling
+            behind. Restart with: scripts\sync-pump.ps1 -Watch
+          runbook: "specs/sync-observability.md"
+
+      - alert: SyncCaptureStopped
+        expr: sync_capture_heartbeat_age_seconds > 75
+        for: 15s
+        labels:
+          severity: critical
+          component: capture
+        annotations:
+          summary: "The capture engine is not running - Oracle changes are not being read"
+          description: >-
+            No heartbeat for {{ $value | humanizeDuration }}. Debezium's offset is durable,
+            so a restart resumes from the last committed SCN without loss - but the redo
+            it needs must still be on disk, so do not leave this until archive logs are
+            purged.
+
+  - name: sync-progress
+    rules:
+      # The pump reports its own halt rather than leaving it to be inferred from
+      # a queue that stopped draining, which takes ten minutes to become obvious.
+      #
+      # `for: 1m` rather than 0m on purpose. In -Watch mode the pump retries the
+      # failed batch on the next pass, which is what carries it through a
+      # transient Hop or Adabas outage - so a halt that clears itself within a
+      # minute is the recovery working, not an incident.
+      - alert: SyncPumpHalted
+        expr: sync_pump_halted == 1
+        for: 1m
+        labels:
+          severity: critical
+          component: pump
+        annotations:
+          summary: "The pump halted on a failed batch and is waiting for a human"
+          description: >-
+            Ordered delivery requires halting rather than skipping, so everything after
+            the failed batch is untouched and nothing is lost. Inspect the batch, then
+            retry it with: scripts\sync-retry.ps1 -Batch <batch>
+
+      - alert: SyncBatchRejected
+        expr: sync_batches_rejected > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: apply
+        annotations:
+          summary: "{{ $value }} batch(es) in sync/rejected waiting for a retry"
+          description: >-
+            The reason is on the dashboard's rejected table, and in full in the batch's
+            own apply_result.txt. Retry is always safe: compare-before-write makes a
+            re-apply a no-op and the ledger refuses anything already applied.
+
+      # Pump alive, queue non-empty, nothing draining. Catches the failures that
+      # are neither a crash nor a clean halt - Hop Server wedged, Adabas
+      # unreachable, an applier looping.
+      - alert: SyncQueueNotDraining
+        expr: sync_batches_pending > 0 and increase(sync_batches_applied_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+          component: pump
+        annotations:
+          summary: "Batches are queued but none has applied in 10 minutes"
+          description: >-
+            {{ $value }} batch(es) pending. The pump is alive and has not reported a halt,
+            so suspect the stages it depends on: Hop Server (docker logs o2a-hop-server)
+            or Adabas (docker logs o2a-adabas).
+
+      # Adabas lag, measured the only way this round can measure it: how long
+      # since anything was acknowledged while work was waiting. A real lag figure
+      # needs Oracle's CURRENT_SCN against sync_last_applied_scn, which is the
+      # Oracle exporter still on the build list.
+      - alert: SyncFallingBehind
+        expr: sync_batches_pending > 0 and (time() - sync_last_applied_timestamp_seconds) > 900
+        for: 5m
+        labels:
+          severity: warning
+          component: sync
+        annotations:
+          summary: "Adabas is more than 15 minutes behind Oracle"
+
+  - name: observability-self
+    rules:
+      # Monitoring that fails quietly is worse than none: it converts "no alerts"
+      # from good news into no news. This is the rule that says so.
+      - alert: SyncExporterDown
+        expr: up{job="sync"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          component: observability
+        annotations:
+          summary: "The sync exporter is not being scraped - every other rule here is blind"
