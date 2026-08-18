@@ -5,6 +5,38 @@
 **Scope:** Oracle to Adabas sync, one leg only (Oracle → Adabas). Lab implementation, production-faithful shape.
 **Predecessor:** the migration lab (Adabas → Oracle bulk migration, `VERIFIED: 5/5`, 2026-08-05)
 
+> ## ⚠️ Domain change, 2026-08-18 — read this before the rest
+>
+> This spec was written and executed against an **employee** aggregate: Adabas file 11
+> `EMPLOYEES`, Oracle `EMPLOYEE` + address lines + languages + incomes. The migration lab
+> then replaced its domain, and that model no longer exists in either database.
+>
+> **The synced aggregate is now the traffic fine:** Adabas file 20 `TRAFFINE`, Oracle
+> `traffic_fine` + `traffic_fine_offence` (MU, offence codes from one stop) +
+> `traffic_fine_payment` (PE, part payments). `APPLYFIN`/`DUMPFIN` replace
+> `APPLYEMP`/`DUMPEMP`, three Hop pipelines replace four, and the fixed-width layouts are
+> in `CHANGE_FILE_CONTRACT.md`.
+>
+> **Nothing architectural changed.** Decisions D1–D8, the six spike results and every
+> cross-cutting concern below hold as written — the new aggregate has the same shape
+> (a root, one MU, one PE), which is why the port was a rename plus new field lists.
+> The examples in sections C4–C6 and §7 are left in their original employee terms
+> **on purpose**: they are the record of what was designed and proven at the time, and
+> rewriting them would quietly claim the spikes were run against data they never saw.
+> Where you need the current layouts, the contract is authoritative, not this document.
+>
+> Two things genuinely gained rather than renamed:
+> - **Amounts and dates travel as text** (`85.00`, `20230505`) end to end, converted in
+>   Natural with `VAL()`. The employee aggregate had no packed decimal; this one does,
+>   and a Hop numeric would render through the server locale.
+> - **Three reverse code lookups instead of one** — status, offence and payment method.
+>
+> Still open, and now the largest single gap: the **vehicle** aggregate is defined in
+> `AggregateDef` but disabled. Adabas file 12 holds one record *per plate*, so writing it
+> back reconciles a set of records rather than occupancy inside one record, and plate
+> removal has no clean answer yet (VIN is not a descriptor, and a removed plate takes its
+> `SOURCE_ISN` with it).
+
 ---
 
 ## 1. Purpose
