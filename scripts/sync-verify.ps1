@@ -129,12 +129,20 @@ Reset-Ledger
 
 # Establish a known starting point in BOTH databases so the tests are
 # repeatable: re-running the suite must not depend on what the last run left.
+# The payment delete is not optional housekeeping: test 5 inserts seq_no 70 and
+# asserts CPAY=1, so both the primary key and the count assertion depend on the
+# fine starting with NO payments - which is how the seed leaves it. Without
+# this, the suite passes once and then fails on ORA-00001 for ever after.
 Sql @"
-UPDATE pocapp.traffic_fine SET location='BASELINE LOC' WHERE fine_no='$TESTKEY';
+UPDATE pocapp.traffic_fine SET location='BASELINE LOC', amount=85 WHERE fine_no='$TESTKEY';
 DELETE FROM pocapp.traffic_fine_offence
  WHERE fine_id=(SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='$TESTKEY')
    AND seq_no > 2;
+DELETE FROM pocapp.traffic_fine_payment
+ WHERE fine_id=(SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='$TESTKEY');
 DELETE FROM pocapp.traffic_fine_offence
+ WHERE fine_id=(SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY');
+DELETE FROM pocapp.traffic_fine_payment
  WHERE fine_id=(SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY');
 DELETE FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY';
 COMMIT;

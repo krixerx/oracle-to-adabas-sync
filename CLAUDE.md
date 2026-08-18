@@ -39,7 +39,7 @@ Running the sync for real instead of testing it:
 
 ```bat
 sync-start.cmd                     :: lab + Hop Server + capture and pump, each in its own window
-check-employee.cmd 11100102        :: one record, Oracle and Adabas side by side
+check-fine.cmd F000000005          :: one record, Oracle and Adabas side by side
 ```
 
 `sync-start.cmd` is the whole live path. The pieces it starts, if you want them
@@ -64,7 +64,7 @@ Container prefix is `o2a-` (the sibling lab uses `a2o-` — easy to mistype).
 
 `scripts/sync-verify.ps1` is monolithic — **there is no flag to run a single criterion**,
 it takes several minutes, and it is destructive: it clears `sync/`, resets the ledger,
-rewrites employee `11100102`, creates and deletes `ZZ777702`, and **stops and restarts
+rewrites fine `F000000005`, creates and deletes `FZZ9999999`, and **stops and restarts
 Adabas** in criterion 9. Run it to prove the whole pipeline, not to iterate.
 
 To iterate, drive one stage at a time (`TESTING_GUIDE.md` §2 is the long form):
@@ -75,11 +75,11 @@ curl -u cluster:cluster "http://localhost:8081/hop/execWorkflow/?workflow=/poc/h
 
 powershell -File scripts\make-batch-info.ps1 batch-000001   :: batch_info.dat + _COMPLETE
 docker exec o2a-natural sh /poc/natural/run-apply.sh batch-000001
-docker exec o2a-natural sh /poc/natural/run-dump.sh 11100102
+docker exec o2a-natural sh /poc/natural/run-dump.sh F000000005
 docker exec o2a-natural sh /poc/natural/run-reset-ledger.sh :: lets the same batch apply again
 ```
 
-`run-dump.sh` (DUMPEMP) reads Adabas independently of the sync's own bookkeeping — which
+`run-dump.sh` (DUMPFIN) reads Adabas independently of the sync's own bookkeeping — which
 is why assertions go through it and never through the ledger or the batch files.
 
 What has to be rebuilt or restarted after an edit:
@@ -99,9 +99,9 @@ Oracle COMMIT → redo → LogMiner → Debezium embedded   capture/  (Java)
   → originator filter (drops SYNCAPP's own writes)    Assembler
   → transaction buffer → re-read whole aggregate      AggregateResolver
   → sync/outbox/batch-NNNNNN/ + _COMPLETE   (CSV)     BatchWriter
-  → reverse field mapping, reverse CODE_LOOKUP        hop/pipelines/60,70,71,72
+  → reverse field mapping, reverse CODE_LOOKUP        hop/pipelines/60,70,71
   → sync/inbox/batch-NNNNNN/            (fixed-width) Hop Server (warm JVM, REST)
-  → apply through business logic                      natural/APPLYEMP.NSP
+  → apply through business logic                      natural/APPLYFIN.NSP
   → ledger file 99 in the SAME ET as the data         natural/LEDGER.*
   → atomic rename to applied/ or rejected/            scripts/sync-pump.ps1
 ```
@@ -117,12 +117,24 @@ payload.** A row delta means only "aggregate X changed"; `AggregateResolver` the
 X in full with ordinary SQL. Do not "optimise" this into reconstructing state from deltas
 — full-set replacement, child-key resolution and idempotent apply all fall out of it.
 
-**The VEHICLE aggregate is only half wired.** `POCAPP.VEHICLE` is in `table.include.list`
-and `AggregateDef.VEHICLE` exists, so every batch carries a `vehicle.csv` — but there is
-no Hop pipeline, no entry in `sync-apply.hwf` and no Natural apply program, so a vehicle
-change is captured and then **silently dropped at the mapping stage**. Finishing it is the
-worked example of "a new aggregate" below; until then, a passing suite is not evidence
-that vehicles sync.
+**The synced aggregate is the traffic fine** — Adabas file 20 `TRAFFINE`, Oracle
+`traffic_fine` + `traffic_fine_offence` (MU) + `traffic_fine_payment` (PE), keyed by
+`FINE_NO`. One aggregate covers scalars, MU, PE, packed amounts, numeric dates and three
+code lookups.
+
+**`AggregateDef.VEHICLE` is defined but NOT enabled** — deliberately. It is absent from
+`all()` and its tables are absent from `table.include.list`, because it has no Hop
+pipeline and no Natural applier. An aggregate captured with nowhere to be applied is not
+half-finished, it is **silently dropped at the mapping stage**, which looks exactly like a
+working sync until someone checks Adabas. Enabling it means adding it in both places at
+once, plus the pipeline and the applier — the worked example of "a new aggregate" below.
+
+⚠️ The vehicle leg is also *structurally* different, which is why it was not just switched
+on: Adabas file 12 holds **one record per plate** (the same VIN re-registered with a
+suffix), so an Oracle vehicle with three plates is three Adabas records. Writing it back
+reconciles a set of records, not occupancy inside one — and plate *removal* has no clean
+answer yet, since VIN is not a descriptor and a removed plate takes its `SOURCE_ISN` with
+it.
 
 ## Invariants — breaking these corrupts data silently
 
@@ -140,7 +152,7 @@ that vehicles sync.
 - **`op=U` is a full-state upsert, never a diff**, and **child sets are complete**. No
   child rows for a parent means the set is now *empty*, not "unchanged" — which is why
   `BatchWriter` writes every known file **header-only** when it has no rows. Omitting the
-  file instead breaks every insert (a new employee has no address lines yet).
+  file instead breaks every insert (a new fine may have no payments yet).
 - **`occurrence_index` is renumbered 1..n contiguously.** Oracle `LINE_NO`/`SEQ_NO` may
   have gaps after deletes; Adabas occurrences must be dense.
 - **The ledger is written in the same Adabas `ET` as the data change**, so "applied but
@@ -159,10 +171,13 @@ though nothing invokes them:
   as stale residue *and the count stays put*. `RESET <field>(n+1:max)` **before** lowering
   the count.
 - **A periodic group is worse.** An occurrence stays alive while *any* field in it holds
-  data — **including fields this sync never maps**, like `BONUS` (an MU nested in the
-  `INCOME` PE). That is why `APPLYEMP` declares and resets `BONUS` despite never writing
-  a value to it. Removing a field from the mapping is therefore a *correctness* change on
-  this leg, not a cosmetic one.
+  data — **including fields this sync never maps**. `APPLYFIN` therefore resets all three
+  `PAYMENT` fields for removed occurrences, not just the one being inspected. Adding a
+  field to the group without resetting it would reintroduce the bug, so removing a field
+  from the mapping is a *correctness* change on this leg, not a cosmetic one.
+  (The employee aggregate had the nastier version of this: `BONUS`, an MU nested inside
+  the `INCOME` PE, was never mapped to Oracle at all and kept occurrences alive on its
+  own. Every field of the current PE is mapped, so that cannot happen here — today.)
 
 `natural/SPIKEMU.NSP` demonstrates the failure in isolation; `TESTING_GUIDE.md` has an
 experiment that breaks it on purpose.
@@ -171,19 +186,28 @@ experiment that breaks it on purpose.
 
 - **A fixed-width layout** → `CHANGE_FILE_CONTRACT.md` (the offset table *is* the spec)
   + the Hop pipeline that pads the fields + the `READ WORK FILE` structure in
-  `APPLYEMP.NSP`. Offsets are absolute: changing one field width shifts everything after
+  `APPLYFIN.NSP`. Offsets are absolute: changing one field width shifts everything after
   it. A wrong layout must fail loudly rather than shift values sideways — that is the
   whole reason this leg is fixed-width and not CSV.
 - **A new aggregate or table** → `capture.properties` `table.include.list` +
   `AggregateDef` (both `all()` and `BY_TABLE` — `all()` is what puts the file in a batch)
   + `AggregateResolver` + a Hop pipeline + `sync-apply.hwf` + a Natural apply program +
   the work-file list in `natural/run-apply.sh` + `CHANGE_FILE_CONTRACT.md`. Miss the last
-  four and the data is captured and then dropped, exactly as VEHICLE is today.
+  four and the data is captured and then dropped - which is why VEHICLE is defined but
+  left out of `all()` and `table.include.list` until its applier exists.
 - **`capture/src/main/resources/capture.properties` and `capture/capture-local.properties`
   are duplicates** — the packaged default and the host-run copy. Edit both, or the jar and
   the local run diverge.
 - **Target schema** → `oracle-init/01_schema.sql` *and* `04_seed.sql` (the post-migration
-  demo snapshot that lets this lab run without the sibling repo).
+  demo snapshot that lets this lab run without the sibling repo). ⚠️ `01_schema.sql` and
+  `02_lookups.sql` are **byte-identical copies** of the sibling repo's files — copied, not
+  re-derived, so the two labs cannot drift apart in the model. Re-copy them rather than
+  editing here, and regenerate `04_seed.sql` by dumping a migrated `a2o-oracle`.
+- **BOTH databases need seeding, and they must agree.** Oracle gets `04_seed.sql` on first
+  container start; Adabas gets `scripts/seed-source.ps1` (run by `lab-up.ps1`), which adds
+  the VIN/type/fuel fields to file 12, creates file 20 with ADAFDU and fills both
+  deterministically. The Adabas seed is what the Oracle seed was dumped from, so changing
+  one without the other makes every record look like a pending change.
 - `oracle-init/` runs **only on first container start**; schema changes need
   `docker compose down -v` or manual DDL. `03_cdc_setup.sql` is the exception —
   `setup-cdc.ps1` applies it to an already-running container.

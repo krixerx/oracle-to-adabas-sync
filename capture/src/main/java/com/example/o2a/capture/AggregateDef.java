@@ -225,15 +225,17 @@ public final class AggregateDef {
     }
 
     /**
-     * Every aggregate this capture engine knows.
+     * Every aggregate this capture engine ACTIVELY syncs.
      *
-     * <p>⚠️ Adding one here makes the batch writer emit its file, which means
-     * something downstream must be able to map and apply it. An aggregate
-     * listed here with no Hop pipeline and no Natural applier is captured and
-     * then silently dropped — see {@code table.include.list}, which is the
-     * other half of the switch.
+     * <p>⚠️ {@link #VEHICLE} is defined above but deliberately absent here, and
+     * its tables are absent from {@code table.include.list} too. It has no Hop
+     * pipeline and no Natural applier yet, and an aggregate that is captured
+     * with nowhere to be applied is not half-finished — it is <b>silently
+     * dropped at the mapping stage</b>, which looks exactly like a working sync
+     * until someone checks Adabas. Enabling it means adding it in both places
+     * at once, together with the pipeline and the applier.
      */
     public static List<AggregateDef> all() {
-        return List.of(TRAFFIC_FINE, VEHICLE);
+        return List.of(TRAFFIC_FINE);
     }
 }

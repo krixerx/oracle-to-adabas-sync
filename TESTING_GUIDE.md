@@ -49,7 +49,7 @@ stage by hand and look at what it produced.
 
 ```
    Oracle          capture           files            Hop Server        Natural         Adabas
-  COMMIT  ──▶  redo → Debezium  ──▶  outbox/  ──▶  reverse mapping ──▶  inbox/  ──▶  APPLYEMP  ──▶  file 11
+  COMMIT  ──▶  redo → Debezium  ──▶  outbox/  ──▶  reverse mapping ──▶  inbox/  ──▶  APPLYFIN  ──▶  file 20
                                      (CSV)          (fixed-width)                    + ledger 99
 ```
 
@@ -92,25 +92,25 @@ docker exec -it o2a-oracle sqlplus pocapp/pocapp@//localhost:1521/FREEPDB1
 ```
 
 ```sql
-UPDATE pocapp.employee SET city = 'LEARNING' WHERE personnel_id = '11100102';
+UPDATE pocapp.traffic_fine SET location = 'LEARNING' WHERE fine_no = 'F000000005';
 COMMIT;
 ```
 
 Within ~5–10 s the capture window prints:
 
 ```
-  wrote batch-000001  rows=10 transactions=1 scn=8591625..8591625
+  wrote batch-000001  rows=3 transactions=1 scn=3280777..3280777
 ```
 
-**Note `rows=9` from a one-column update** (the exact number depends on how many
-occurrences that employee currently has: 1 parent + address lines + languages + incomes).
-That is decision D4 working: we don't ship the delta, we re-read the *whole employee
+**Note `rows=3` from a one-column update** (the exact number depends on how many
+occurrences that fine currently has: 1 parent + its offence codes + its payments).
+That is decision D4 working: we don't ship the delta, we re-read the *whole fine
 aggregate*. Look at it:
 
 ```bat
 dir sync\outbox\batch-000001
-type sync\outbox\batch-000001\employee.csv
-type sync\outbox\batch-000001\employee_language.csv
+type sync\outbox\batch-000001\traffic_fine.csv
+type sync\outbox\batch-000001\traffic_fine_offence.csv
 type sync\outbox\batch-000001\manifest.json
 ```
 
@@ -118,10 +118,14 @@ Things to notice:
 
 - `_COMPLETE` is the last file written. A reader ignores any batch directory without it —
   that's what stops anyone reading a half-written batch.
-- `employee_language.csv` has `occurrence_index` 1,2,3 **contiguous**, whatever the
+- `traffic_fine_offence.csv` has `occurrence_index` 1,2 **contiguous**, whatever the
   `SEQ_NO` values in Oracle happen to be. Adabas occurrences must be dense.
+- `traffic_fine_payment.csv` is present **with only a header** when the fine has no
+  payments. That is not an omission: an empty child file means "the set is now empty",
+  which is different from "unchanged".
 - `manifest.json` carries `start_scn`/`end_scn` — the restart watermark.
-- `marital_status` is still the *description* (`Single`). Hop reverses it next.
+- `status` is still the *description* (`Appealed`), and `amount` is text with a decimal
+  point (`85.00`). Hop reverses the description next.
 
 ### Stage 3 — run the reverse mapping by hand
 
@@ -132,13 +136,15 @@ curl -u cluster:cluster "http://localhost:8081/hop/execWorkflow/?workflow=/poc/h
 Expect `<result>OK</result>`. Now compare the two formats:
 
 ```bat
-type sync\outbox\batch-000001\employee.csv     :: CSV, human-friendly
-type sync\inbox\batch-000001\employee.dat      :: fixed-width, mainframe-friendly
+type sync\outbox\batch-000001\traffic_fine.csv     :: CSV, human-friendly
+type sync\inbox\batch-000001\traffic_fine.dat      :: fixed-width, mainframe-friendly
 ```
 
-The `.dat` line is exactly 143 characters, no delimiters. Count to position 79 and you'll
-find `S` where the CSV said `Single` — that's the reverse `CODE_LOOKUP`, the same table
-the migration lab used in the forward direction.
+The `.dat` line is exactly 81 characters, no delimiters. Count to position 73 and you'll
+find `A` where the CSV said `Appealed` — that's the reverse `CODE_LOOKUP`, the same table
+the migration lab used in the forward direction. The MU file does the same trick:
+`traffic_fine_offence.dat` carries `SPD2`, not "Speeding, more than 20 km/h over the
+limit".
 
 > **Why two formats?** Natural's `READ WORK FILE <structure>` parses fixed-width
 > positionally for free. Parsing CSV in Natural means hand-writing delimiter, quoting and
@@ -157,19 +163,19 @@ docker exec o2a-natural sh /poc/natural/run-apply.sh batch-000001
 ```
 
 ```
-UPDATED 11100102
+UPDATED F000000005
 SUMMARY batch= 1 stored= 0 updated= 1 skipped= 0 deleted= 0
 ```
 
 ### Stage 5 — look at the Adabas record
 
 ```bat
-docker exec o2a-natural sh /poc/natural/run-dump.sh 11100102
+docker exec o2a-natural sh /poc/natural/run-dump.sh F000000005
 ```
 
-`CITY=LEARNING`. The change has crossed from Oracle to the mainframe side.
+`LOC=LEARNING`. The change has crossed from Oracle to the mainframe side.
 
-`DUMPEMP` deliberately prints **six** occurrences of each MU/PE regardless of the count
+`DUMPFIN` deliberately prints **six** occurrences of each MU/PE regardless of the count
 field, so you can see whether removed occurrences are really gone or merely uncounted —
 which is exactly the bug class §6 is about.
 
@@ -199,11 +205,11 @@ That is the demo worth showing people.
 | `capture\src\...\AggregateResolver.java` | The re-read SQL (decision D4) | To change what's fetched |
 | `capture\src\...\BatchWriter.java` | Batch directories, `_COMPLETE`, manifest | Rarely |
 | `capture\capture-local.properties` | Connection, **`table.include.list`**, flush interval | To change scope |
-| `hop\pipelines\60_sync_employee.hpl` | Parent reverse mapping + code reversal | **Where mappings live** |
+| `hop\pipelines\60_sync_traffic_fine.hpl` | Parent reverse mapping + code reversal | **Where mappings live** |
 | `hop\pipelines\7*_sync_*.hpl` | Child (MU/PE) reverse mappings | Same |
-| `hop\workflows\sync-apply.hwf` | Runs the four pipelines for one batch | If you add a shape |
-| `natural\APPLYEMP.NSP` | **The apply API** — upsert, delete, MU/PE replacement, ledger | **The other interesting logic** |
-| `natural\DUMPEMP.NSP` | Read-only dump used by the tests to assert on Adabas | To assert on more fields |
+| `hop\workflows\sync-apply.hwf` | Runs the three pipelines for one batch | If you add a shape |
+| `natural\APPLYFIN.NSP` | **The apply API** — upsert, delete, MU/PE replacement, ledger | **The other interesting logic** |
+| `natural\DUMPFIN.NSP` | Read-only dump used by the tests to assert on Adabas | To assert on more fields |
 | `natural\RESETLED.NSP` | Clears the watermark — **test support only** | Between test runs |
 | `natural\LEDGER.fdt/.fdu/.NSD` | Adabas file 99 definition + DDM | Rarely |
 | `sync\` | Runtime: `outbox inbox applied rejected state` | Look, don't edit |
@@ -237,13 +243,13 @@ design:
 
 | Concern | Lives in | Example |
 |---|---|---|
-| Which Oracle tables form one Adabas record | `AggregateDef.java` | `EMPLOYEE` + 3 children → file 11 |
-| Which SQL fetches it | `AggregateDef.java` (`rootSelectSql`) | the `TO_CHAR(BIRTH_DATE,'YYYYMMDD')` lives here |
-| Field names, widths, code reversal | **Hop `.hpl`** | `'Single'` → `'S'` |
-| Adabas field/occurrence semantics | `APPLYEMP.NSP` | `C*LANG`, `RESET LANG(2:20)` |
+| Which Oracle tables form one Adabas record | `AggregateDef.java` | `TRAFFIC_FINE` + 2 children → file 20 |
+| Which SQL fetches it | `AggregateDef.java` (`rootSelectSql`) | the `TO_CHAR(OFFENCE_DATE,'YYYYMMDD')` lives here |
+| Field names, widths, code reversal | **Hop `.hpl`** | `'Appealed'` → `'A'` |
+| Adabas field/occurrence semantics | `APPLYFIN.NSP` | `C*OFFENCE-CODE`, `RESET OFFENCE-CODE(3:20)` |
 
 To see the Hop half on a canvas, open the Hop GUI (`hop-gui-o2a.cmd`) and open
-`pipelines\60_sync_employee.hpl`. **Preview** on the lookup transform is the clearest
+`pipelines\60_sync_traffic_fine.hpl`. **Preview** on the lookup transform is the clearest
 possible demonstration of the code reversal.
 
 ---
@@ -255,20 +261,20 @@ type SQL in a third.
 
 **a) Watch a scalar change travel.**
 ```sql
-UPDATE pocapp.employee SET job_title = 'DATA ARCHAEOLOGIST' WHERE personnel_id = '11100102';
+UPDATE pocapp.traffic_fine SET location = 'ROUNDABOUT 7' WHERE fine_no = 'F000000005';
 COMMIT;
 ```
-Then `run-dump.sh 11100102`. Time it — you should see 5–10 s.
+Then `run-dump.sh F000000005`. Time it — you should see 5–10 s.
 
 **b) See a delete, which polling could never see.**
 ```sql
-DELETE FROM pocapp.employee_language
- WHERE emp_id = (SELECT emp_id FROM pocapp.employee WHERE personnel_id='11100102')
-   AND seq_no = (SELECT MAX(seq_no) FROM pocapp.employee_language
-                  WHERE emp_id = (SELECT emp_id FROM pocapp.employee WHERE personnel_id='11100102'));
+DELETE FROM pocapp.traffic_fine_offence
+ WHERE fine_id = (SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='F000000005')
+   AND seq_no = (SELECT MAX(seq_no) FROM pocapp.traffic_fine_offence
+                  WHERE fine_id = (SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='F000000005'));
 COMMIT;
 ```
-Watch `CLANG` drop by one *and* the vacated occurrence come back empty in the dump. A
+Watch `COFF` drop by one *and* the vacated occurrence come back empty in the dump. A
 `LAST_MODIFIED`-column poller would never have noticed this row leaving.
 
 **c) Prove loop prevention with your own hands.**
@@ -276,7 +282,7 @@ Watch `CLANG` drop by one *and* the vacated occurrence come back empty in the du
 docker exec -it o2a-oracle sqlplus syncapp/syncapp@//localhost:1521/FREEPDB1
 ```
 ```sql
-UPDATE pocapp.employee SET city = 'SHOULD-NOT-TRAVEL' WHERE personnel_id = '11100102';
+UPDATE pocapp.traffic_fine SET location = 'SHOULD-NOT-TRAVEL' WHERE fine_no = 'F000000005';
 COMMIT;
 ```
 No batch appears. Stop the capture service and it reports `echoes filtered: 1`. This is
@@ -293,12 +299,12 @@ ledger guard is deliberately reset first so you're seeing compare-before-write i
 not the watermark short-circuit.
 
 **e) Break the MU/PE shrink on purpose — the best lesson here.**
-In `natural\APPLYEMP.NSP`, comment out one `RESET` line in `MOVE-FIELDS`:
+In `natural\APPLYFIN.NSP`, comment out one `RESET` line in `MOVE-FIELDS`:
 ```natural
-*  RESET LANG(#LNG-CNT + 1:20)      <-- comment this out
-   C*LANG := #LNG-CNT
+*  RESET OFFENCE-CODE(#OFF-CNT + 1:20)   <-- comment this out
+   C*OFFENCE-CODE := #OFF-CNT
 ```
-Then delete some languages in Oracle and sync. The count drops, but `run-dump.sh` shows
+Then delete some offence rows in Oracle and sync. The count drops, but `run-dump.sh` shows
 the old values **still sitting there** beyond the count. No error anywhere. Put the line
 back. This is the trap that spike S4 exists to document, and seeing it once is worth more
 than reading about it.
@@ -308,10 +314,10 @@ each). You now have three batches. Delete the *middle* one from `sync\outbox\` a
 pump: it applies the first, then halts at the gap rather than skipping ahead — because
 applying batch 3 would move the watermark past batch 2 forever.
 
-**g) Add a field to the sync.** `EMPLOYEE.COUNTRY_CODE` is already carried; try adding
+**g) Add a field to the sync.** `TRAFFIC_FINE.OFFENDER_NATIONAL_ID` is already carried; try adding
 something not currently mapped. You'll touch all four layers: `AggregateDef` (SQL +
 column list), the contract layout, the Hop pipeline (input field + output field with a
-width), and `APPLYEMP` (record layout + `MOVE-FIELDS` + `COMPARE-RECORD`). Doing this once
+width), and `APPLYFIN` (record layout + `MOVE-FIELDS` + `COMPARE-RECORD`). Doing this once
 teaches the shape of the whole system.
 
 ---
@@ -325,7 +331,7 @@ docker exec -it o2a-oracle sqlplus pocapp/pocapp@//localhost:1521/FREEPDB1
 
 **Adabas** — via the dump program (no SQL; Adabas isn't relational):
 ```bat
-docker exec o2a-natural sh /poc/natural/run-dump.sh 11100102
+docker exec o2a-natural sh /poc/natural/run-dump.sh F000000005
 ```
 
 **The ledger** (Adabas file 99 — how far the sync has got):
@@ -392,5 +398,7 @@ lab dies quietly.
 6. If appetite remains: (g), add a field end to end.
 
 Round 3 topics, deliberately not here: conflict detection, dirty data, encoding /
-codepages, MU/PE before-images, and the `VEHICLES` aggregate (only `EMPLOYEES` is wired
-into the sync so far).
+codepages, MU/PE before-images, and the **vehicle aggregate** (only the traffic fine is
+wired into the sync so far). The vehicle leg is not just more of the same: Adabas file 12
+holds one record *per plate*, so an Oracle vehicle with three plates is three Adabas
+records, and writing it back reconciles a set of records rather than occupancy inside one.

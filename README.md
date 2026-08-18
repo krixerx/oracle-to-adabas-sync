@@ -19,6 +19,12 @@ broken test. See [Why 9 and not 10](#why-9-and-not-10).
 > writes back from. If you are wondering why Oracle holds an Adabas-shaped schema, that
 > repo is the answer.
 
+**What is synchronised:** the **traffic fine** — Adabas file 20 `TRAFFINE`, which Oracle
+holds as `traffic_fine` plus two child tables. It has one multiple-value field (the
+offences seen in a single stop) and one periodic group (part payments), so a single
+aggregate exercises scalar fields, MU and PE occupancy, packed amounts, numeric dates and
+three separate code lookups.
+
 ## What it demonstrates
 
 | | |
@@ -34,7 +40,7 @@ broken test. See [Why 9 and not 10](#why-9-and-not-10).
 
 ```
 Oracle 23ai Free                                          Adabas CE
-  COMMIT                                                    file 11 EMPLOYEES
+  COMMIT                                                    file 20 TRAFFINE
     │ redo log                                                    ▲
     ▼                                                             │
   LogMiner ──▶ Debezium (embedded, no broker)                     │
@@ -58,7 +64,7 @@ Oracle 23ai Free                                          Adabas CE
        sync/inbox/batch-NNNNNN/     (fixed-width)                 │
                     │                                             │
                     ▼                                             │
-              APPLYEMP (Natural) ─── through business logic ──────┘
+              APPLYFIN (Natural) ─── through business logic ──────┘
                     │
                     └──▶ ledger file 99, same ET as the data change
                     └──▶ atomic rename to applied/ or rejected/
@@ -87,7 +93,11 @@ sync-verify.cmd                    :: the acceptance suite
 ```
 
 `lab-up.ps1` must come first — the two setup scripts `docker cp` into running
-containers.
+containers. It also runs `seed-source.ps1`, which manufactures the **Adabas** side of the
+post-migration state: the Community Edition demo database has no VIN, no vehicle-type
+field and no traffic-fine file at all, so file 20 is created with ADAFDU and filled
+deterministically. That is the mirror of `oracle-init/04_seed.sql` on the Oracle side, and
+it has to be redone after every `docker compose down -v`.
 
 To watch the sync work continuously instead of running the test suite:
 
@@ -101,9 +111,9 @@ Then change something in Oracle and watch it arrive in Adabas:
 
 ```bat
 docker exec -it o2a-oracle sqlplus pocapp/pocapp@//localhost:1521/FREEPDB1
-  UPDATE pocapp.employee SET city = 'MYTEST' WHERE personnel_id = '11100102';
+  UPDATE pocapp.traffic_fine SET location = 'MYTEST' WHERE fine_no = 'F000000005';
   COMMIT;
-check-employee.cmd 11100102        :: shows the Oracle row and the Adabas record side by side
+check-fine.cmd F000000005          :: shows the Oracle row and the Adabas record side by side
 ```
 
 A stage-by-stage walkthrough — the same record seen as an Oracle row, a CSV, a
@@ -170,15 +180,15 @@ the disk.
 ```
 sync-verify.cmd              the acceptance suite (10 criteria)
 sync-start.cmd               start capture + pump for interactive use
-check-employee.cmd           show one record in Oracle and Adabas side by side
+check-fine.cmd               show one fine in Oracle and Adabas side by side
 docker-compose.yml           adabas, natural, oracle, hop-server
 CHANGE_FILE_CONTRACT.md      the capture → Hop → Natural interface
 specs/                       the full design: decisions, spikes, open items
 oracle-init/                 schema, lookups, CDC setup, post-migration seed
 capture/                     Java: Debezium embedded engine, assembler, batch writer
-hop/pipelines/               60 employee · 70 address · 71 language · 72 income (reverse mapping)
-natural/                     APPLYEMP (apply API) · DUMPEMP (assertions) · LEDGER · SPIKE* demos
-scripts/                     setup-cdc · setup-adabas-ledger · sync-pump · sync-verify · lab-up
+hop/pipelines/               60 fine · 70 offences (MU) · 71 payments (PE)  (reverse mapping)
+natural/                     APPLYFIN (apply API) · DUMPFIN (assertions) · SEED* (Adabas source state) · LEDGER · SPIKE* demos
+scripts/                     setup-cdc · setup-adabas-ledger · seed-source · sync-pump · sync-verify · lab-up
 sync/                        outbox / inbox / applied / rejected (gitignored)
 ```
 
