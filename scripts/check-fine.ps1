@@ -1,11 +1,11 @@
-# Shows one employee as ORACLE has it and as ADABAS has it, side by side,
+# Shows one traffic fine as ORACLE has it and as ADABAS has it, side by side,
 # and says whether the two agree on the synced fields.
 #
-# The Adabas side is read by a SEPARATE Natural program (DUMPEMP), never by
+# The Adabas side is read by a SEPARATE Natural program (DUMPFIN), never by
 # the sync's own bookkeeping - so agreement here means the data genuinely
 # matches, not that the pipeline agrees with itself.
 param(
-    [Parameter(Mandatory = $true)][string]$PersonnelId
+    [Parameter(Mandatory = $true)][string]$FineNo
 )
 $ErrorActionPreference = "Stop"
 $poc = Split-Path -Parent $PSScriptRoot
@@ -13,18 +13,20 @@ $poc = Split-Path -Parent $PSScriptRoot
 # ---------------------------------------------------------------- Oracle
 $sql = @"
 SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF LINESIZE 400
-SELECT 'CITY='     || city         FROM pocapp.employee WHERE personnel_id = '$PersonnelId';
-SELECT 'JOB='      || job_title    FROM pocapp.employee WHERE personnel_id = '$PersonnelId';
-SELECT 'LASTNAME=' || last_name    FROM pocapp.employee WHERE personnel_id = '$PersonnelId';
-SELECT 'MARSTAT='  || marital_status FROM pocapp.employee WHERE personnel_id = '$PersonnelId';
-SELECT 'NLANG='    || COUNT(*) FROM pocapp.employee_language
- WHERE emp_id = (SELECT emp_id FROM pocapp.employee WHERE personnel_id = '$PersonnelId');
+SELECT 'LOC='      || location   FROM pocapp.traffic_fine WHERE fine_no = '$FineNo';
+SELECT 'PLATE='    || plate_no   FROM pocapp.traffic_fine WHERE fine_no = '$FineNo';
+SELECT 'AMOUNT='   || TO_CHAR(amount,'FM99999990.00') FROM pocapp.traffic_fine WHERE fine_no = '$FineNo';
+SELECT 'STATUS='   || status     FROM pocapp.traffic_fine WHERE fine_no = '$FineNo';
+SELECT 'NOFF='     || COUNT(*) FROM pocapp.traffic_fine_offence
+ WHERE fine_id = (SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no = '$FineNo');
+SELECT 'NPAY='     || COUNT(*) FROM pocapp.traffic_fine_payment
+ WHERE fine_id = (SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no = '$FineNo');
 EXIT;
 "@
-$tmp = Join-Path $env:TEMP "check_emp.sql"
+$tmp = Join-Path $env:TEMP "check_fine.sql"
 [System.IO.File]::WriteAllText($tmp, $sql, (New-Object System.Text.UTF8Encoding($false)))
-docker cp $tmp "o2a-oracle:/tmp/check_emp.sql" | Out-Null
-$oraRaw = docker exec o2a-oracle sqlplus -s pocapp/pocapp@//localhost:1521/FREEPDB1 `@/tmp/check_emp.sql 2>&1
+docker cp $tmp "o2a-oracle:/tmp/check_fine.sql" | Out-Null
+$oraRaw = docker exec o2a-oracle sqlplus -s pocapp/pocapp@//localhost:1521/FREEPDB1 `@/tmp/check_fine.sql 2>&1
 
 $ora = @{}
 foreach ($line in $oraRaw) {
@@ -32,7 +34,7 @@ foreach ($line in $oraRaw) {
 }
 
 # ---------------------------------------------------------------- Adabas
-$adaRaw = docker exec o2a-natural sh /poc/natural/run-dump.sh $PersonnelId 2>&1
+$adaRaw = docker exec o2a-natural sh /poc/natural/run-dump.sh $FineNo 2>&1
 $ada = @{}
 $notFound = $false
 foreach ($line in $adaRaw) {
@@ -43,7 +45,7 @@ foreach ($line in $adaRaw) {
 
 # ---------------------------------------------------------------- report
 Write-Host ""
-Write-Host "  Employee $PersonnelId" -ForegroundColor Cyan
+Write-Host "  Traffic fine $FineNo" -ForegroundColor Cyan
 Write-Host "  ---------------------------------------------------------------"
 Write-Host ("  {0,-12} {1,-24} {2,-24} {3}" -f "FIELD", "ORACLE (source)", "ADABAS (target)", "")
 Write-Host "  ---------------------------------------------------------------"
@@ -52,15 +54,17 @@ if ($notFound) {
     Write-Host "  (no such record in Adabas)" -ForegroundColor Yellow
 }
 
-# marital_status is stored as the DESCRIPTION in Oracle and as the CODE in
-# Adabas, so they are compared by first letter - that difference IS the
-# mapping, not a mismatch.
+# status is stored as the DESCRIPTION in Oracle and as the CODE in Adabas,
+# so they are compared by first letter - that difference IS the mapping,
+# not a mismatch. (It holds for this domain: Issued/Paid/Cancelled/Appealed
+# all start with their own code letter.)
 $rows = @(
-    @{ f = "CITY";     o = $ora['CITY'];     a = $ada['CITY'];  exact = $true }
-    @{ f = "JOB TITLE"; o = $ora['JOB'];     a = $ada['JOB'];   exact = $true }
-    @{ f = "LAST NAME"; o = $ora['LASTNAME']; a = $ada['NAME']; exact = $true }
-    @{ f = "MARITAL";  o = $ora['MARSTAT'];  a = $ada['MARSTAT']; exact = $false }
-    @{ f = "#LANGUAGES"; o = $ora['NLANG'];  a = $ada['CLANG']; exact = $true }
+    @{ f = "LOCATION"; o = $ora['LOC'];    a = $ada['LOC'];    exact = $true }
+    @{ f = "PLATE";    o = $ora['PLATE'];  a = $ada['PLATE'];  exact = $true }
+    @{ f = "AMOUNT";   o = $ora['AMOUNT']; a = $ada['AMOUNT']; exact = $true }
+    @{ f = "STATUS";   o = $ora['STATUS']; a = $ada['STATUS']; exact = $false }
+    @{ f = "#OFFENCES"; o = $ora['NOFF'];  a = $ada['COFF'];   exact = $true }
+    @{ f = "#PAYMENTS"; o = $ora['NPAY'];  a = $ada['CPAY'];   exact = $true }
 )
 
 $mismatch = 0

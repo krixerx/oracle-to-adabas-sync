@@ -1,13 +1,13 @@
 # One-time Adabas setup for the sync: creates file 99 (SYNCLEDGER), the
 # apply watermark file.
 #
-# WHY THIS EXISTS: the applier (natural/APPLYEMP.NSP) writes a ledger record in
+# WHY THIS EXISTS: the applier (natural/APPLYFIN.NSP) writes a ledger record in
 # the SAME Adabas ET as the data change, so a crash between "applied" and
 # "recorded as applied" is impossible. That watermark also drives the ordering
 # guard, which refuses any batch not strictly newer than the last one applied.
 # Without file 99 the applier has nowhere to write it and every batch fails.
 #
-# The Adabas CE image ships the EMPLOYEES/VEHICLES demo files but of course
+# The Adabas CE image ships the demo database files but of course
 # knows nothing about file 99, so a fresh adabas-data volume needs this run
 # once. It is idempotent: re-running it on an existing file 99 is a no-op.
 #

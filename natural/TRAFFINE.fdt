@@ -1,0 +1,31 @@
+;############################################################################
+;#  TRAFFINE.fdt - FDT for the traffic-fine file (Adabas file 20).
+;#
+;#  Unlike EMPLOYEES and VEHICLES this file is not part of the Community
+;#  Edition demo database - scripts/seed-source.ps1 creates it with ADAFDU and
+;#  natural/SEEDFIN.NSP fills it. It is shaped the way a 1990s traffic system
+;#  would have shaped it:
+;#
+;#    - the fine records the PLATE the camera read, not the vehicle. Resolving
+;#      that plate to a vehicle is the migration's job (and it is why the
+;#      multi-plate workaround matters: a fine on '344RG94-2' belongs to the
+;#      same car as one on '344RG94');
+;#    - several offences from one stop live in a MULTIPLE-VALUE field;
+;#    - part payments live in a PERIODIC GROUP.
+;#
+;#  AE/AR are 4-byte packed = 7 digits with 2 decimals implied by the DDM;
+;#  Adabas itself has no notion of the decimal point.
+;############################################################################
+
+ 1   , AA ,  10 , A , DE,UQ        ;fine-no        - business key
+ 1   , AB ,  15 , A , DE,NU        ;plate-no       - as recorded, suffix and all
+ 1   , AC ,   8 , U , NU           ;offence-date   - numeric YYYYMMDD
+ 1   , AD ,  30 , A , NU           ;location
+ 1   , AE ,   4 , P , NU           ;amount         - P7.2
+ 1   , AF ,   1 , A , NU           ;status         - code, resolved in Hop
+ 1   , AG ,   8 , A , DE,NU        ;offender-id    - national id
+ 1   , AH ,   4 , A , NU,MU        ;offence-code   - MU: several per stop
+ 1   , AP , PE                     ;payment        - PE: part payments
+ 2   , AQ ,   8 , U , NU           ;pay-date       - numeric YYYYMMDD
+ 2   , AR ,   4 , P , NU           ;pay-amount     - P7.2
+ 2   , AS ,   2 , A , NU           ;pay-method     - code, resolved in Hop

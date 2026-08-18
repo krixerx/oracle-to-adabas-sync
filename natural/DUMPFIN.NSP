@@ -1,0 +1,83 @@
+* DUMPFIN - dumps one TRAFFINE record as text so the test harness can
+* assert on Adabas state from outside (sync-verify.cmd).
+* Reads the fine number from /sync/work/dump_key.txt.
+*
+* Deliberately a SEPARATE program from APPLYFIN, reading Adabas directly:
+* an assertion that went through the applier's own bookkeeping could pass
+* by the pipeline agreeing with itself.
+*
+* No terminal WRITE (headless); output goes to work file 5.
+DEFINE DATA LOCAL
+1 V VIEW OF TRAFFINE
+  2 FINE-NO
+  2 PLATE-NO
+  2 OFFENCE-DATE
+  2 LOCATION
+  2 AMOUNT
+  2 STATUS
+  2 OFFENDER-ID
+  2 C*OFFENCE-CODE
+  2 OFFENCE-CODE (1:20)
+  2 C*PAYMENT
+  2 PAY-DATE (1:20)
+  2 PAY-AMT (1:20)
+  2 PAY-METH (1:20)
+1 #KEY  (A10)
+1 #LINE (A) DYNAMIC
+1 #I    (I4)
+1 #N    (I4)
+* Packed fields print as raw digits otherwise: AMOUNT 85.00 is stored as
+* 8500 and a COMPRESS would show "8500", which reads like 8500.00 and
+* makes a wrong amount look right. Edit masks keep the harness honest.
+1 #AMT9 (A9)
+1 #PAM9 (A9)
+END-DEFINE
+*
+DEFINE WORK FILE 6 '/sync/work/dump_key.txt' TYPE 'ASCII'
+DEFINE WORK FILE 5 '/sync/work/dump_result.txt' TYPE 'ASCII'
+*
+READ WORK FILE 6 ONCE #KEY
+*
+RESET #N
+FIND V WITH FINE-NO = #KEY
+  ADD 1 TO #N
+  COMPRESS 'FOUND' FINE-NO INTO #LINE
+  WRITE WORK FILE 5 VARIABLE #LINE
+  COMPRESS 'PLATE=' PLATE-NO INTO #LINE LEAVING NO SPACE
+  WRITE WORK FILE 5 VARIABLE #LINE
+  COMPRESS 'ODATE=' OFFENCE-DATE INTO #LINE LEAVING NO SPACE
+  WRITE WORK FILE 5 VARIABLE #LINE
+  COMPRESS 'LOC=' LOCATION INTO #LINE LEAVING NO SPACE
+  WRITE WORK FILE 5 VARIABLE #LINE
+  MOVE EDITED AMOUNT (EM=ZZZZZ9.99) TO #AMT9
+  COMPRESS 'AMOUNT=' #AMT9 INTO #LINE LEAVING NO SPACE
+  WRITE WORK FILE 5 VARIABLE #LINE
+  COMPRESS 'STATUS=' STATUS INTO #LINE LEAVING NO SPACE
+  WRITE WORK FILE 5 VARIABLE #LINE
+  COMPRESS 'OFFENDER=' OFFENDER-ID INTO #LINE LEAVING NO SPACE
+  WRITE WORK FILE 5 VARIABLE #LINE
+  COMPRESS 'COFF=' C*OFFENCE-CODE INTO #LINE LEAVING NO SPACE
+  WRITE WORK FILE 5 VARIABLE #LINE
+  COMPRESS 'CPAY=' C*PAYMENT INTO #LINE LEAVING NO SPACE
+  WRITE WORK FILE 5 VARIABLE #LINE
+* Dump 6 occurrences regardless of the count, so a test can prove that
+* residue beyond the count is really gone rather than merely uncounted.
+  FOR #I = 1 TO 6
+    COMPRESS 'OFF' #I '=' OFFENCE-CODE(#I) INTO #LINE LEAVING NO SPACE
+    WRITE WORK FILE 5 VARIABLE #LINE
+  END-FOR
+  FOR #I = 1 TO 6
+    MOVE EDITED PAY-AMT(#I) (EM=ZZZZZ9.99) TO #PAM9
+    COMPRESS 'PAY' #I '=' PAY-DATE(#I) '/' #PAM9 '/' PAY-METH(#I)
+      INTO #LINE LEAVING NO SPACE
+    WRITE WORK FILE 5 VARIABLE #LINE
+  END-FOR
+END-FIND
+*
+IF #N = 0
+  COMPRESS 'NOTFOUND' #KEY INTO #LINE
+  WRITE WORK FILE 5 VARIABLE #LINE
+END-IF
+CLOSE WORK FILE 5
+*
+END

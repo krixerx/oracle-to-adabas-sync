@@ -6,7 +6,7 @@ REM   "O2A CAPTURE"  - reads the Oracle redo log, writes batch files
 REM   "O2A PUMP"     - maps each batch with Hop and applies it to Adabas
 REM
 REM Close those windows (or Ctrl-C in them) to stop syncing.
-REM Check a record afterwards with:  check-employee.cmd <personnel-id>
+REM Check a record afterwards with:  check-fine.cmd <fine-no>
 setlocal
 cd /d "%~dp0"
 
@@ -38,11 +38,11 @@ echo  SYNC IS RUNNING.
 echo.
 echo  Change something in Oracle:
 echo    docker exec -it o2a-oracle sqlplus pocapp/pocapp@//localhost:1521/FREEPDB1
-echo    UPDATE pocapp.employee SET city = 'MYTEST' WHERE personnel_id = '11100102';
+echo    UPDATE pocapp.traffic_fine SET location = 'MYTEST' WHERE fine_no = 'F000000005';
 echo    COMMIT;
 echo.
 echo  Then check Adabas (5-10 seconds later):
-echo    check-employee.cmd 11100102
+echo    check-fine.cmd F000000005
 echo ----------------------------------------------------------------
 endlocal
 exit /b 0

@@ -1,0 +1,11 @@
+;############################################################################
+;#  TRAFFINE.fdu - ADAFDU parameters for the traffic-fine file.
+;#  Used together with TRAFFINE.fdt (pointed to by $FDUFDT).
+;#  dbid= and file= are prepended by natural/create-fine-file.sh.
+;############################################################################
+name   = TRAFFINE
+maxisn = 20000
+nisize = 50b
+uisize = 50b
+dssize = 50b
+reuse  = (isn,ds)

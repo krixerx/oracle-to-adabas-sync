@@ -1,0 +1,267 @@
+* SEEDVEH - LAB DATA PREPARATION for the Adabas VEHICLES file (DBID 1, file 12).
+*
+* This is NOT part of the migration. It manufactures, inside Adabas, the two
+* legacy-data shapes the migration has to cope with. Run by
+* scripts\seed-source.ps1 (which adds the BA/BB fields first), and re-runnable:
+* every pass below is idempotent.
+*
+*   1. VIN (field BA) for every vehicle - 17 characters, derived from MAKE + ISN
+*      so it is stable across runs.
+*
+*   2. The multi-plate workaround. The old system has no place to record a second
+*      registration plate for one vehicle, so operators registered the vehicle
+*      AGAIN with the same VIN plus a trailing digit ('...0000011', '...0000012')
+*      and A DIFFERENT PLATE NUMBER in REG-NUM. That plate is a real, unrelated
+*      registration - not the first plate with a suffix - because registering
+*      another plate is the entire point of the workaround.
+*      Fourteen vehicles get 1-5 extra rows each. Six of them end up with MORE
+*      than three plates, which the new model (max 3) must reject rather than
+*      silently drop, so MIGRATION_REJECT gets a decent population.
+*
+*   3. VEH-TYPE (field BB) - a house-grown type code ('SEDAN', 'LORRY', 'MBIKE'
+*      ...) cycled over the file, plus 'X-OLD' every 100th record: a code that is
+*      NOT in the mapping table, so the unmapped path gets exercised too.
+*
+*   4. The POWERTRAIN puzzle - two partial sources, on purpose:
+*      (a) the VIN, but only for FORD and BMW, and each in a DIFFERENT position
+*          with a DIFFERENT alphabet. That is what real VINs are like: positions
+*          4-8 are the manufacturer's own descriptor and nothing standardises
+*          them, which is why decoding needs a rule table rather than a formula.
+*            FORD  VIN position 5 : E=electric P=plug-in H=hybrid G=petrol
+*            BMW   VIN position 8 : I=electric X=plug-in A=hybrid B=petrol
+*          Every other make encodes NOTHING - the majority of the file.
+*      (b) FUEL-DESC (field BC), 30 years of free text: 'PETROL', 'petrol',
+*          'BENZIN', 'ELEC.', 'PLUG-IN HYBRID', 'N/A', blank. Cycled over ALL
+*          vehicles, so it sometimes CONTRADICTS the VIN - which the mapping has
+*          to notice rather than average out.
+*
+* Headless run: NO terminal WRITE statements (avoids the MORE prompt).
+DEFINE DATA LOCAL
+1 V VIEW OF VEHICLES
+  2 REG-NUM
+  2 PERSONNEL-ID
+  2 MAKE
+  2 MODEL
+  2 COLOR
+  2 YEAR
+  2 VIN
+  2 VEH-TYPE
+  2 FUEL-DESC
+1 #ISN (N10)
+1 #DEL (N8)
+1 #UPD (N8)
+1 #ADD (N8)
+1 #HOLD (I4)
+1 #CYC (I2)
+1 #CYC100 (I4)
+1 #I (I2)
+1 #J (I2)
+1 #SUF (A1)
+* VIN laid out by position: 3 WMI + 6 VDS + 8 serial = 17, then the suffix the
+* legacy workaround appends. The redefine is what makes "base VIN vs suffix"
+* explicit here and in the extract.
+1 #VIN (A25)
+1 REDEFINE #VIN
+  2 #VIN-WMI (A3)
+  2 #VIN-VDS (A6)
+  2 #VIN-SER (A8)
+  2 #VIN-SUF (A8)
+1 #MAKE (A20)
+1 REDEFINE #MAKE
+  2 #MAKE3 (A3)
+  2 #MAKE-REST (A17)
+* The VDS, addressed character by character so "FORD puts it in VIN position 5,
+* BMW in position 8" can be written as exactly that. #VDS1 is VIN position 4.
+1 #VDS (A6)
+1 REDEFINE #VDS
+  2 #VDS1 (A1)
+  2 #VDS2 (A1)
+  2 #VDS3 (A1)
+  2 #VDS4 (A1)
+  2 #VDS5 (A1)
+  2 #VDS6 (A1)
+1 #CYCPT (I2)
+1 #CYCFD (I2)
+1 #PTCHF (A1/1:4)
+1 #PTCHB (A1/1:4)
+1 #FUELD (A20/1:16)
+1 #BASE-VIN (A25)
+1 #PLATE (A15)
+* Extra plates are issued from a range the demo data does not use: every real
+* 8-digit plate in the file sits in the 30-31 million band, so 9xxxxxxx cannot
+* collide - which matters because REG-NUM is a UNIQUE descriptor and a clash
+* would fail the STORE.
+1 #PLATENO (N8)
+1 #TYPES (A8/1:9)
+1 #BASE-ISN (N10/1:14)
+1 #EXTRAS (I2/1:14)
+1 #LINE (A) DYNAMIC
+END-DEFINE
+*
+DEFINE WORK FILE 7 '/tmp/seed_counts.txt' TYPE 'ASCII'
+*
+* Custom type codes as the legacy application spelled them. Assigned in code
+* rather than INIT <...> so the list stays readable next to the mapping table
+* in oracle-init/02_lookups.sql - change these two together.
+#TYPES(1) := 'SEDAN'
+#TYPES(2) := 'ESTATE'
+#TYPES(3) := 'HATCH'
+#TYPES(4) := 'COUPE'
+#TYPES(5) := 'PICKUP'
+#TYPES(6) := 'VAN-C'
+#TYPES(7) := 'LORRY'
+#TYPES(8) := 'MBIKE'
+#TYPES(9) := 'MINIBUS'
+*
+* The two manufacturers that encode the powertrain in the VIN - deliberately
+* using different letters for the same thing, because real ones do.
+#PTCHF(1) := 'E'    #PTCHB(1) := 'I'
+#PTCHF(2) := 'P'    #PTCHB(2) := 'X'
+#PTCHF(3) := 'H'    #PTCHB(3) := 'A'
+#PTCHF(4) := 'G'    #PTCHB(4) := 'B'
+*
+* FUEL-DESC as three decades of clerks actually typed it. Every one of these
+* has to normalise to EV / PHEV / HEV / PETROL - or to nothing at all.
+#FUELD(1)  := 'PETROL'
+#FUELD(2)  := 'petrol'
+#FUELD(3)  := 'GASOLINE'
+#FUELD(4)  := 'BENZIN'
+#FUELD(5)  := 'ELECTRIC'
+#FUELD(6)  := 'ELEC.'
+#FUELD(7)  := 'EV'
+#FUELD(8)  := 'BATTERY ONLY'
+#FUELD(9)  := 'HYBRID'
+#FUELD(10) := 'HYB'
+#FUELD(11) := 'HEV SELF CHG'
+#FUELD(12) := 'PLUG-IN HYBRID'
+#FUELD(13) := 'PHEV'
+#FUELD(14) := 'PLUGIN HYB'
+#FUELD(15) := ' '
+#FUELD(16) := 'N/A'
+*
+* Which vehicles carry extra plates, and how many EXTRA rows each gets.
+* Anything over 2 extras means more than 3 plates in total - one more than the
+* new model allows - so those surplus rows land in MIGRATION_REJECT. Six of the
+* fourteen are over the limit, by 1, 2 or 3 plates.
+*                     extras   plates   rejected
+#BASE-ISN(1)  := 1    #EXTRAS(1)  := 2   /*  3    -
+#BASE-ISN(2)  := 2    #EXTRAS(2)  := 1   /*  2    -
+#BASE-ISN(3)  := 3    #EXTRAS(3)  := 3   /*  4    1
+#BASE-ISN(4)  := 4    #EXTRAS(4)  := 1   /*  2    -
+#BASE-ISN(5)  := 5    #EXTRAS(5)  := 2   /*  3    -
+#BASE-ISN(6)  := 6    #EXTRAS(6)  := 4   /*  5    2
+#BASE-ISN(7)  := 7    #EXTRAS(7)  := 3   /*  4    1
+#BASE-ISN(8)  := 8    #EXTRAS(8)  := 2   /*  3    -
+#BASE-ISN(9)  := 9    #EXTRAS(9)  := 5   /*  6    3
+#BASE-ISN(10) := 10   #EXTRAS(10) := 1   /*  2    -
+#BASE-ISN(11) := 11   #EXTRAS(11) := 3   /*  4    1
+#BASE-ISN(12) := 12   #EXTRAS(12) := 2   /*  3    -
+#BASE-ISN(13) := 13   #EXTRAS(13) := 4   /*  5    2
+#BASE-ISN(14) := 14   #EXTRAS(14) := 1   /*  2    -
+*                             34 extra rows, 10 plates rejected
+#PLATENO := 90000000
+*
+* ---- pass 1: drop the rows a previous run stored ------------------------
+* Identified by the suffix, which only the workaround rows carry. Doing this
+* first is what makes the whole program re-runnable.
+READ V BY ISN
+  MOVE V.VIN TO #VIN
+  IF #VIN-SUF NE ' '
+    DELETE
+    ADD 1 TO #DEL
+    ADD 1 TO #HOLD
+    IF #HOLD > 50
+      END TRANSACTION
+      RESET #HOLD
+    END-IF
+  END-IF
+END-READ
+END TRANSACTION
+RESET #HOLD
+*
+* ---- pass 2: VIN + VEH-TYPE for every remaining record ------------------
+RESET #CYC #CYC100
+READ V BY ISN
+  #ISN := *ISN
+  RESET #VIN #MAKE
+  #MAKE := V.MAKE
+  #VIN-WMI := #MAKE3
+* a make shorter than 3 characters would leave blanks inside the VIN
+  EXAMINE #VIN-WMI FOR ' ' REPLACE WITH 'Z'
+* the descriptor: filler for most makes, a powertrain letter for two of them
+  #VDS := 'ZZ1JZW'
+  ADD 1 TO #CYCPT
+  IF #CYCPT > 4
+    #CYCPT := 1
+  END-IF
+  IF #VIN-WMI = 'FOR'
+    #VDS2 := #PTCHF(#CYCPT)
+  END-IF
+  IF #VIN-WMI = 'BMW'
+    #VDS5 := #PTCHB(#CYCPT)
+  END-IF
+  #VIN-VDS := #VDS
+  MOVE EDITED #ISN (EM=99999999) TO #VIN-SER
+  V.VIN := #VIN
+*
+  ADD 1 TO #CYCFD
+  IF #CYCFD > 16
+    #CYCFD := 1
+  END-IF
+  V.FUEL-DESC := #FUELD(#CYCFD)
+  ADD 1 TO #CYC
+  IF #CYC > 9
+    #CYC := 1
+  END-IF
+  V.VEH-TYPE := #TYPES(#CYC)
+  ADD 1 TO #CYC100
+  IF #CYC100 > 100
+    #CYC100 := 1
+  END-IF
+  IF #CYC100 = 100
+    V.VEH-TYPE := 'X-OLD'
+  END-IF
+  UPDATE
+  ADD 1 TO #UPD
+  ADD 1 TO #HOLD
+  IF #HOLD > 50
+    END TRANSACTION
+    RESET #HOLD
+  END-IF
+END-READ
+END TRANSACTION
+RESET #HOLD
+*
+* ---- pass 3: the multi-plate workaround --------------------------------
+* A copy of the base record with the VIN suffixed and a different plate.
+* PERSONNEL-ID is copied unchanged, which keeps the file's referential
+* integrity constraint against file 9 satisfied.
+FOR #I = 1 TO 14
+  GET V #BASE-ISN(#I)
+  #BASE-VIN := V.VIN
+  FOR #J = 1 TO #EXTRAS(#I)
+    MOVE EDITED #J (EM=9) TO #SUF
+    MOVE #BASE-VIN TO #VIN
+    #VIN-SUF := #SUF
+    V.VIN := #VIN
+* A genuinely different registration number - NOT the base plate with a suffix.
+* The whole reason the workaround exists is that a second, unrelated plate had
+* to be recorded and the file has room for only one.
+    ADD 1 TO #PLATENO
+    MOVE EDITED #PLATENO (EM=99999999) TO #PLATE
+    V.REG-NUM := #PLATE
+    STORE V
+    ADD 1 TO #ADD
+  END-FOR
+END-FOR
+END TRANSACTION
+*
+COMPRESS 'deleted:' #DEL INTO #LINE LEAVING NO SPACE
+WRITE WORK FILE 7 VARIABLE #LINE
+COMPRESS 'updated:' #UPD INTO #LINE LEAVING NO SPACE
+WRITE WORK FILE 7 VARIABLE #LINE
+COMPRESS 'stored:' #ADD INTO #LINE LEAVING NO SPACE
+WRITE WORK FILE 7 VARIABLE #LINE
+CLOSE WORK FILE 7
+*
+END

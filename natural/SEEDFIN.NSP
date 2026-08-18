@@ -1,0 +1,271 @@
+* SEEDFIN - LAB DATA PREPARATION for the traffic-fine file (DBID 1, file 20).
+*
+* Not part of the migration. File 20 is not in the Community Edition demo
+* database at all - create-fine-file.sh builds it with ADAFDU and this program
+* fills it, deterministically, so every run produces the same data.
+*
+* Fines are raised against the PLATE, read from the VEHICLES file - including
+* the second and third plates the multi-plate workaround produced, which is
+* exactly what makes the plate -> vehicle resolution worth testing: a fine on
+* plate 90000001 has to reach the same car as one on plate 344RG94. Eight extra
+* fines carry plates that appear nowhere in the vehicle file (foreign or
+* long-deregistered vehicles); those must survive the migration as fines with
+* no vehicle rather than being lost.
+*
+* Each fine gets 1-3 offence codes (MU: several offences from one stop) and,
+* when it is paid, 1-2 payments (PE: part payments).
+*
+* Re-runnable: pass 1 empties the file.
+* Headless run: NO terminal WRITE statements (avoids the MORE prompt).
+DEFINE DATA LOCAL
+1 V VIEW OF VEHICLES
+  2 REG-NUM
+  2 PERSONNEL-ID
+1 F VIEW OF TRAFFINE
+  2 FINE-NO
+  2 PLATE-NO
+  2 OFFENCE-DATE
+  2 LOCATION
+  2 AMOUNT
+  2 STATUS
+  2 OFFENDER-ID
+  2 C*OFFENCE-CODE
+  2 OFFENCE-CODE (1:3)
+  2 C*PAYMENT
+  2 PAY-DATE (1:2)
+  2 PAY-AMT (1:2)
+  2 PAY-METH (1:2)
+1 #DEL (N8)
+1 #ADD (N8)
+1 #OFF (N8)
+1 #PAY (N8)
+1 #HOLD (I4)
+1 #SEQ (N9)
+1 #SEQ9 (A9)
+1 #J (I2)
+1 #K (I2)
+* #M, not #K: BUILD-FINE is called from inside a FOR #K loop in pass 3, and
+* reusing the index inside the subroutine would corrupt the caller's loop
+1 #M (I2)
+1 #NFINE (I2)
+1 #NOFF (I2)
+1 #NPAY (I2)
+1 #PLATE (A15)
+1 #OWNER (A8)
+1 #AMT (N7.2)
+1 #HALF (N7.2)
+1 #PD (I2)
+* cycling counters - deterministic stand-ins for randomness, so the seeded
+* data is identical on every run and the expected counts stay stable
+1 #CYCF (I2)
+1 #CYCY (I2)
+1 #CYCM (I2)
+1 #CYCD (I2)
+1 #CYCA (I2)
+1 #CYCS (I2)
+1 #CYCO (I2)
+1 #CYCC (I2)
+1 #CYCP (I2)
+1 #CYCM2 (I2)
+1 #FINES (I2/1:5)
+1 #LOCS (A30/1:6)
+1 #OFFCD (A4/1:6)
+1 #STAT (A1/1:5)
+1 #METH (A2/1:3)
+1 #LINE (A) DYNAMIC
+END-DEFINE
+*
+DEFINE WORK FILE 8 '/tmp/seed_fine_counts.txt' TYPE 'ASCII'
+*
+* how many fines the 1st..5th vehicle of each cycle of five gets
+#FINES(1) := 1
+#FINES(2) := 1
+#FINES(3) := 2
+#FINES(4) := 3
+#FINES(5) := 0
+*
+#LOCS(1) := 'SULTAN QABOOS ST'
+#LOCS(2) := 'AL KHUWAIR R/A'
+#LOCS(3) := 'MUSCAT EXPRESSWAY'
+#LOCS(4) := 'NIZWA HIGHWAY'
+#LOCS(5) := 'SOHAR PORT RD'
+#LOCS(6) := 'SALALAH CORNICHE'
+*
+* offence codes as the legacy system wrote them - resolved via CODE_LOOKUP
+#OFFCD(1) := 'SPD1'
+#OFFCD(2) := 'SPD2'
+#OFFCD(3) := 'RLGT'
+#OFFCD(4) := 'SBLT'
+#OFFCD(5) := 'MOBP'
+#OFFCD(6) := 'PARK'
+*
+#STAT(1) := 'P'
+#STAT(2) := 'P'
+#STAT(3) := 'I'
+#STAT(4) := 'C'
+#STAT(5) := 'A'
+*
+#METH(1) := 'CA'
+#METH(2) := 'CC'
+#METH(3) := 'BT'
+*
+* ---- pass 1: empty the file -------------------------------------------
+READ F BY ISN
+  DELETE
+  ADD 1 TO #DEL
+  ADD 1 TO #HOLD
+  IF #HOLD > 50
+    END TRANSACTION
+    RESET #HOLD
+  END-IF
+END-READ
+END TRANSACTION
+RESET #HOLD
+*
+* ---- pass 2: fines against plates that really exist --------------------
+READ V BY ISN
+  IF V.REG-NUM = ' '
+* the one demo vehicle with no registration number cannot be fined
+    ESCAPE TOP
+  END-IF
+  #PLATE := V.REG-NUM
+  #OWNER := V.PERSONNEL-ID
+  ADD 1 TO #CYCF
+  IF #CYCF > 5
+    #CYCF := 1
+  END-IF
+  #NFINE := #FINES(#CYCF)
+  FOR #J = 1 TO #NFINE
+    PERFORM BUILD-FINE
+  END-FOR
+END-READ
+END TRANSACTION
+RESET #HOLD
+*
+* ---- pass 3: fines whose plate is in no vehicle record -----------------
+* Foreign or long-deregistered vehicles. The migration must keep these as
+* fines with no vehicle, and say so, rather than drop them.
+FOR #K = 1 TO 8
+  MOVE EDITED #K (EM=99999) TO #SEQ9
+  COMPRESS 'FGN' #SEQ9 INTO #PLATE LEAVING NO SPACE
+  #OWNER := '99999999'
+  PERFORM BUILD-FINE
+END-FOR
+END TRANSACTION
+*
+COMPRESS 'deleted:' #DEL INTO #LINE LEAVING NO SPACE
+WRITE WORK FILE 8 VARIABLE #LINE
+COMPRESS 'fines:' #ADD INTO #LINE LEAVING NO SPACE
+WRITE WORK FILE 8 VARIABLE #LINE
+COMPRESS 'offences:' #OFF INTO #LINE LEAVING NO SPACE
+WRITE WORK FILE 8 VARIABLE #LINE
+COMPRESS 'payments:' #PAY INTO #LINE LEAVING NO SPACE
+WRITE WORK FILE 8 VARIABLE #LINE
+CLOSE WORK FILE 8
+*
+* ---- one fine for #PLATE / #OWNER -------------------------------------
+DEFINE SUBROUTINE BUILD-FINE
+  ADD 1 TO #SEQ
+  RESET F.OFFENCE-CODE(1:3) F.PAY-DATE(1:2) F.PAY-AMT(1:2) F.PAY-METH(1:2)
+  MOVE EDITED #SEQ (EM=999999999) TO #SEQ9
+  COMPRESS 'F' #SEQ9 INTO F.FINE-NO LEAVING NO SPACE
+  F.PLATE-NO := #PLATE
+  F.OFFENDER-ID := #OWNER
+*
+* offence date, built from components so it is always a valid day
+  ADD 1 TO #CYCY
+  IF #CYCY > 3
+    #CYCY := 1
+  END-IF
+  ADD 1 TO #CYCM
+  IF #CYCM > 12
+    #CYCM := 1
+  END-IF
+  ADD 1 TO #CYCD
+  IF #CYCD > 28
+    #CYCD := 1
+  END-IF
+  COMPUTE F.OFFENCE-DATE = (2021 + #CYCY) * 10000 + #CYCM * 100 + #CYCD
+*
+  ADD 1 TO #CYCC
+  IF #CYCC > 6
+    #CYCC := 1
+  END-IF
+  F.LOCATION := #LOCS(#CYCC)
+*
+  ADD 1 TO #CYCA
+  IF #CYCA > 8
+    #CYCA := 1
+  END-IF
+  COMPUTE #AMT = 25 + (#CYCA - 1) * 15
+  F.AMOUNT := #AMT
+*
+  ADD 1 TO #CYCS
+  IF #CYCS > 5
+    #CYCS := 1
+  END-IF
+  F.STATUS := #STAT(#CYCS)
+*
+* MU: 1-3 offence codes on one fine
+  ADD 1 TO #NOFF
+  IF #NOFF > 3
+    #NOFF := 1
+  END-IF
+  FOR #M = 1 TO #NOFF
+    ADD 1 TO #CYCO
+    IF #CYCO > 6
+      #CYCO := 1
+    END-IF
+    F.OFFENCE-CODE(#M) := #OFFCD(#CYCO)
+  END-FOR
+  F.C*OFFENCE-CODE := #NOFF
+  ADD #NOFF TO #OFF
+*
+* PE: payments only exist once the fine has been paid
+  RESET #NPAY
+  IF F.STATUS = 'P'
+    ADD 1 TO #CYCP
+    IF #CYCP > 2
+      #CYCP := 1
+    END-IF
+    #NPAY := #CYCP
+    COMPUTE #PD = #CYCD + 1
+    IF #PD > 28
+      #PD := 28
+    END-IF
+    IF #NPAY = 1
+      COMPUTE F.PAY-DATE(1) = (2021 + #CYCY) * 10000 + #CYCM * 100 + #PD
+      F.PAY-AMT(1) := #AMT
+      ADD 1 TO #CYCM2
+      IF #CYCM2 > 3
+        #CYCM2 := 1
+      END-IF
+      F.PAY-METH(1) := #METH(#CYCM2)
+    ELSE
+* two part payments that add up to the fine exactly
+      COMPUTE #HALF = #AMT / 2
+      COMPUTE F.PAY-DATE(1) = (2021 + #CYCY) * 10000 + #CYCM * 100 + #PD
+      F.PAY-AMT(1) := #HALF
+      COMPUTE F.PAY-DATE(2) = (2021 + #CYCY) * 10000 + #CYCM * 100 + #PD
+      COMPUTE F.PAY-AMT(2) = #AMT - #HALF
+      ADD 1 TO #CYCM2
+      IF #CYCM2 > 3
+        #CYCM2 := 1
+      END-IF
+      F.PAY-METH(1) := #METH(#CYCM2)
+      F.PAY-METH(2) := #METH(#CYCM2)
+    END-IF
+  END-IF
+  F.C*PAYMENT := #NPAY
+  ADD #NPAY TO #PAY
+*
+  STORE F
+  ADD 1 TO #ADD
+  ADD 1 TO #HOLD
+  IF #HOLD > 50
+    END TRANSACTION
+    RESET #HOLD
+  END-IF
+END-SUBROUTINE
+*
+END

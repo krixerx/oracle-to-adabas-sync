@@ -1,0 +1,33 @@
+DB: 000 FILE: 012  - VEHICLES                         DEFAULT SEQUENCE:   
+TYPE: ADABAS
+ 
+T L DB Name                              F Leng  S D Remark
+- - -- --------------------------------  - ----  - - ------------------------
+  1 AA REG-NUM                           A   15  N D 
+       HD=REGISTRATION/NUMBER
+  1 AB CHASSIS-NUM                       B    4      
+  1 AC PERSONNEL-ID                      A    8    D 
+*      FK TO EMPLOYEES FILE 9
+G 1 CD CAR-DETAILS                                   
+  2 AD MAKE                              A   20  N D 
+  2 AE MODEL                             A   20  N   
+  2 AF COLOR                             A   10  N D 
+  1 AG YEAR                              N  4.0  N   
+       HD=YEAR/BUILT
+  1 AH CLASS                             A    1  F D 
+  1 AI LEASE-PUR                         A    1  F   
+  1 AJ DATE-ACQ                          N  8.0  N   
+G 1 AK CURRENCY-INFO                                 
+  2 AL CURR-CODE                         A    3  N   
+M 2 AM MAINT-COST                        P  7.0  N   
+  1 BA VIN                               A   25  N   
+*      ADDED BY scripts\seed-source.ps1 (ADADBM ADD_FIELDS)
+*      A25, NOT A17: the legacy plate workaround appends a
+*      character past position 17 - see SEEDVEH.NSP
+  1 BB VEH-TYPE                          A    8  N   
+*      LEGACY/CUSTOM TYPE CODE, MAPPED TO A STANDARD ONE IN HOP
+  1 BC FUEL-DESC                         A   20  N   
+*      FREE TEXT, 30 YEARS OF IT - 'PETROL' 'petrol' 'BENZIN'
+*      'ELEC.' 'PLUG-IN HYBRID' 'N/A' AND BLANK. NORMALISED IN
+*      JAVASCRIPT, AND ONLY CONSULTED WHEN THE VIN CANNOT SAY.
+******DDM OUTPUT TERMINATED******

@@ -2,7 +2,7 @@
 # mapping into sync/inbox, then applies it to Adabas.
 #
 #   outbox/batch-N  --(Hop Server, warm JVM)-->  inbox/batch-N
-#                   --(APPLYEMP through Natural)-->  Adabas
+#                   --(APPLYFIN through Natural)-->  Adabas
 #                   --(atomic rename)-->  applied/batch-N
 #
 # Deliberately a thin loop over the pieces rather than a daemon: each stage

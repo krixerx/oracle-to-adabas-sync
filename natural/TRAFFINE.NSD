@@ -1,0 +1,22 @@
+DB: 000 FILE: 020  - TRAFFINE                         DEFAULT SEQUENCE:   
+TYPE: ADABAS
+ 
+T L DB Name                              F Leng  S D Remark
+- - -- --------------------------------  - ----  - - ------------------------
+  1 AA FINE-NO                           A   10    D 
+  1 AB PLATE-NO                          A   15  N D 
+*      AS RECORDED AT THE ROADSIDE - MAY CARRY THE LEGACY SUFFIX
+  1 AC OFFENCE-DATE                      N  8.0  N   
+  1 AD LOCATION                          A   30  N   
+  1 AE AMOUNT                            P  7.2  N   
+  1 AF STATUS                            A    1  N   
+*      I=ISSUED P=PAID C=CANCELLED A=APPEALED
+  1 AG OFFENDER-ID                       A    8  N D 
+M 1 AH OFFENCE-CODE                      A    4  N   
+*      MU - SEVERAL OFFENCES CAN COME FROM ONE STOP
+P 1 AP PAYMENT                                       
+*      PE - PART PAYMENTS AGAINST ONE FINE
+  2 AQ PAY-DATE                          N  8.0  N   
+  2 AR PAY-AMT                           P  7.2  N   
+  2 AS PAY-METH                          A    2  N   
+******DDM OUTPUT TERMINATED******

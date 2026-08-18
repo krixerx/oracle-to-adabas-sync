@@ -43,3 +43,13 @@ docker ps --filter "name=o2a" --format "table {{.Names}}\t{{.Status}}"
 # even though the container may look alive.
 $nuc = docker logs --since 5m o2a-adabas 2>&1 | Select-String "DBSTART|CONCURRLOCK|ABORTED"
 if ($nuc) { Write-Host "`nAdabas nucleus:"; $nuc | ForEach-Object { Write-Host "  $_" } }
+
+# This lab UPDATES Adabas records that the migration lab already produced, so
+# Adabas must hold the post-migration state before any sync can run - the
+# mirror of what oracle-init/04_seed.sql does on the Oracle side. The CE demo
+# database has no VIN, no vehicle-type field and no traffic-fine file at all,
+# so that state has to be manufactured. Idempotent, and required after every
+# `docker compose down -v`.
+Write-Host "`nAdabas source state (vehicles + traffic fines):"
+& (Join-Path $PSScriptRoot "seed-source.ps1")
+if ($LASTEXITCODE -ne 0) { throw "seed-source.ps1 failed" }

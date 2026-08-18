@@ -2,7 +2,7 @@
 # Prints "SYNC VERIFIED: n/n", in the spirit of the migration lab's "VERIFIED: 5/5".
 #
 # Each test makes a change in ORACLE, runs the sync, and asserts on ADABAS.
-# Assertions read Adabas through DUMPEMP - never through the sync's own
+# Assertions read Adabas through DUMPFIN - never through the sync's own
 # bookkeeping - so a test cannot pass by the pipeline agreeing with itself.
 #
 # Usage:  powershell -File scripts\sync-verify.ps1
@@ -15,8 +15,9 @@ $script:Fail = 0
 $script:Skip = 0
 $script:Results = @()
 
-$TESTKEY = '11100102'      # existing employee, has MU + PE data
-$NEWKEY  = 'ZZ777702'      # synthetic, created and removed by test 2/3
+$TESTKEY = 'F000000005'   # existing fine, has 2 offence codes (MU)
+$NEWKEY  = 'FZZ9999999'   # synthetic, created and removed by test 2/3
+$NEWISN  = 9999999        # source_isn for the synthetic fine (UNIQUE column)
 
 # ---------------------------------------------------------------- helpers
 function Sql([string]$sql, [string]$user = "pocapp/pocapp") {
@@ -81,10 +82,8 @@ function Stop-Capture($p) {
 }
 
 function Sync-Once([int]$waitSeconds = 18) {
-    # Give the flush timer (5 s) time to write a batch, then pump it through.
     Start-Sleep -Seconds $waitSeconds
-    $out = powershell -File (Join-Path $poc "scripts\sync-pump.ps1") 2>&1
-    return ($out -join "`n")
+    & (Join-Path $poc "scripts\sync-pump.ps1") | Out-Null
 }
 
 function Reset-Ledger {
@@ -92,11 +91,10 @@ function Reset-Ledger {
 }
 
 function Clear-SyncDirs {
-    foreach ($d in @('applied', 'inbox', 'outbox', 'rejected')) {
+    foreach ($d in @("outbox", "inbox", "applied", "rejected", "state")) {
         $p = Join-Path $poc "sync\$d"
         if (Test-Path $p) {
-            Get-ChildItem $p -ErrorAction SilentlyContinue |
-                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force $p
         }
     }
 }
@@ -132,12 +130,13 @@ Reset-Ledger
 # Establish a known starting point in BOTH databases so the tests are
 # repeatable: re-running the suite must not depend on what the last run left.
 Sql @"
-UPDATE pocapp.employee SET city='BASELINE', job_title='BASELINE JOB'
- WHERE personnel_id='$TESTKEY';
-DELETE FROM pocapp.employee_language
- WHERE emp_id=(SELECT emp_id FROM pocapp.employee WHERE personnel_id='$TESTKEY')
-   AND seq_no > 1;
-DELETE FROM pocapp.employee WHERE personnel_id='$NEWKEY';
+UPDATE pocapp.traffic_fine SET location='BASELINE LOC' WHERE fine_no='$TESTKEY';
+DELETE FROM pocapp.traffic_fine_offence
+ WHERE fine_id=(SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='$TESTKEY')
+   AND seq_no > 2;
+DELETE FROM pocapp.traffic_fine_offence
+ WHERE fine_id=(SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY');
+DELETE FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY';
 COMMIT;
 "@ | Out-Null
 
@@ -146,71 +145,80 @@ try {
     Sync-Once | Out-Null      # drain the baseline change so tests start clean
 
     # -------------------------------------------------------------- 1
-    Sql "UPDATE pocapp.employee SET city='T1-VILNIUS' WHERE personnel_id='$TESTKEY'; COMMIT;" | Out-Null
+    Sql "UPDATE pocapp.traffic_fine SET location='T1-MUSCAT EXPWY' WHERE fine_no='$TESTKEY'; COMMIT;" | Out-Null
     Sync-Once | Out-Null
     $d = Dump $TESTKEY
-    Check 1 "scalar update propagates" ($d['CITY'] -eq 'T1-VILNIUS') "CITY=$($d['CITY'])"
+    Check 1 "scalar update propagates" ($d['LOC'] -eq 'T1-MUSCAT EXPWY') "LOC=$($d['LOC'])"
 
     # -------------------------------------------------------------- 2
     Sql @"
-INSERT INTO pocapp.employee (source_isn, personnel_id, first_name, last_name,
-       birth_date, gender_code, marital_status, dept_code, job_title, city,
-       postal_code, country_code)
-VALUES (999702, '$NEWKEY', 'NEW', 'VIAORACLE', DATE '1991-02-03', 'F',
-        'Married', 'IT', 'ANALYST', 'RIGA', '1010', 'LVA');
-INSERT INTO pocapp.employee_language (emp_id, seq_no, language_code)
- SELECT emp_id, 1, 'LAV' FROM pocapp.employee WHERE personnel_id='$NEWKEY';
+INSERT INTO pocapp.traffic_fine (source_isn, fine_no, plate_no, offence_date, location,
+       amount, status_code, status, offender_national_id)
+VALUES ($NEWISN, '$NEWKEY', '344RG94', DATE '2026-02-03', 'T2-NIZWA ROAD',
+        45.50, 'I', 'Issued', '50000100');
+INSERT INTO pocapp.traffic_fine_offence (fine_id, seq_no, offence_code, offence_desc)
+ SELECT fine_id, 1, 'PARK', 'Illegal parking' FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY';
 COMMIT;
 "@ | Out-Null
     Sync-Once | Out-Null
     $d = Dump $NEWKEY
-    # marital_status 'Married' must come back as the CODE 'M' - proving the
-    # reverse CODE_LOOKUP ran, not just that a row arrived.
+    # status 'Issued' must come back as the CODE 'I', and the offence
+    # description as 'PARK' - proving the reverse CODE_LOOKUP ran on both
+    # the parent and the MU, not just that a record arrived. The amount
+    # proves the decimal survived the text round trip.
     Check 2 "insert propagates (incl. reverse code lookup)" `
-        ($d['FOUND'] -and $d['CITY'] -eq 'RIGA' -and $d['MARSTAT'] -eq 'M') `
-        "FOUND=$($d['FOUND']) CITY=$($d['CITY']) MARSTAT=$($d['MARSTAT'])"
+        ($d['FOUND'] -and $d['LOC'] -eq 'T2-NIZWA ROAD' -and $d['STATUS'] -eq 'I' `
+         -and $d['OFF1'] -eq 'PARK' -and $d['AMOUNT'] -eq '45.50') `
+        "FOUND=$($d['FOUND']) LOC=$($d['LOC']) STATUS=$($d['STATUS']) OFF1=$($d['OFF1']) AMOUNT=$($d['AMOUNT'])"
 
     # -------------------------------------------------------------- 3
-    Sql "DELETE FROM pocapp.employee_language WHERE emp_id=(SELECT emp_id FROM pocapp.employee WHERE personnel_id='$NEWKEY'); DELETE FROM pocapp.employee WHERE personnel_id='$NEWKEY'; COMMIT;" | Out-Null
+    Sql "DELETE FROM pocapp.traffic_fine_offence WHERE fine_id=(SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY'); DELETE FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY'; COMMIT;" | Out-Null
     Sync-Once | Out-Null
     $d = Dump $NEWKEY
     Check 3 "delete propagates" ($d['NOTFOUND'] -eq $true) "record still present"
 
     # -------------------------------------------------------------- 4
-    # The MU/PE case that silently corrupts if the applier forgets to RESET
+    # The MU case that silently corrupts if the applier forgets to RESET
     # trailing occurrences before lowering the count.
     Sql @"
-INSERT INTO pocapp.employee_language (emp_id, seq_no, language_code)
- SELECT emp_id, 50, 'SWE' FROM pocapp.employee WHERE personnel_id='$TESTKEY';
-INSERT INTO pocapp.employee_language (emp_id, seq_no, language_code)
- SELECT emp_id, 60, 'NOR' FROM pocapp.employee WHERE personnel_id='$TESTKEY';
+INSERT INTO pocapp.traffic_fine_offence (fine_id, seq_no, offence_code, offence_desc)
+ SELECT fine_id, 50, 'SBLT', 'Seat belt not worn' FROM pocapp.traffic_fine WHERE fine_no='$TESTKEY';
+INSERT INTO pocapp.traffic_fine_offence (fine_id, seq_no, offence_code, offence_desc)
+ SELECT fine_id, 60, 'MOBP', 'Using a mobile phone while driving' FROM pocapp.traffic_fine WHERE fine_no='$TESTKEY';
 COMMIT;
 "@ | Out-Null
     Sync-Once | Out-Null
     $grow = Dump $TESTKEY
-    $grewOk = ($grow['CLANG'] -eq '3' -and $grow['LANG2'] -eq 'SWE' -and $grow['LANG3'] -eq 'NOR')
+    # seq_no 50 and 60 must arrive as occurrences 3 and 4: Adabas occurrences
+    # are dense, so the capture renumbers them 1..n.
+    $grewOk = ($grow['COFF'] -eq '4' -and $grow['OFF3'] -eq 'SBLT' -and $grow['OFF4'] -eq 'MOBP')
 
-    Sql "DELETE FROM pocapp.employee_language WHERE emp_id=(SELECT emp_id FROM pocapp.employee WHERE personnel_id='$TESTKEY') AND seq_no >= 50; COMMIT;" | Out-Null
+    Sql "DELETE FROM pocapp.traffic_fine_offence WHERE fine_id=(SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='$TESTKEY') AND seq_no >= 50; COMMIT;" | Out-Null
     Sync-Once | Out-Null
     $shrink = Dump $TESTKEY
-    # Assert the residue is GONE, not merely uncounted: LANG2/LANG3 are read
+    # Assert the residue is GONE, not merely uncounted: OFF3/OFF4 are read
     # beyond the count deliberately.
-    $shrankOk = ($shrink['CLANG'] -eq '1' -and $shrink['LANG2'] -eq '' -and $shrink['LANG3'] -eq '')
+    $shrankOk = ($shrink['COFF'] -eq '2' -and $shrink['OFF3'] -eq '' -and $shrink['OFF4'] -eq '')
     Check 4 "MU set grows and shrinks, no residue" ($grewOk -and $shrankOk) `
-        "grow CLANG=$($grow['CLANG']) LANG2=$($grow['LANG2']); shrink CLANG=$($shrink['CLANG']) LANG2='$($shrink['LANG2'])' LANG3='$($shrink['LANG3'])'"
+        "grow COFF=$($grow['COFF']) OFF3=$($grow['OFF3']) OFF4=$($grow['OFF4']); shrink COFF=$($shrink['COFF']) OFF3='$($shrink['OFF3'])' OFF4='$($shrink['OFF4'])'"
 
     # -------------------------------------------------------------- 5
+    # Parent and PE child changed in ONE Oracle transaction: both must land
+    # together, and the payment must arrive as a dense occurrence with its
+    # method description reversed to the A2 code.
     Sql @"
-UPDATE pocapp.employee SET city='T5-CITY', job_title='T5 JOB' WHERE personnel_id='$TESTKEY';
-INSERT INTO pocapp.employee_language (emp_id, seq_no, language_code)
- SELECT emp_id, 70, 'DAN' FROM pocapp.employee WHERE personnel_id='$TESTKEY';
+UPDATE pocapp.traffic_fine SET location='T5-SALALAH', amount=77.25 WHERE fine_no='$TESTKEY';
+INSERT INTO pocapp.traffic_fine_payment (fine_id, seq_no, paid_date, paid_amount, method_code, method)
+ SELECT fine_id, 70, DATE '2026-03-04', 17.25, 'BT', 'Bank transfer'
+   FROM pocapp.traffic_fine WHERE fine_no='$TESTKEY';
 COMMIT;
 "@ | Out-Null
     Sync-Once | Out-Null
     $d = Dump $TESTKEY
     Check 5 "multi-table transaction lands together" `
-        ($d['CITY'] -eq 'T5-CITY' -and $d['JOB'] -eq 'T5 JOB' -and $d['CLANG'] -eq '2' -and $d['LANG2'] -eq 'DAN') `
-        "CITY=$($d['CITY']) JOB=$($d['JOB']) CLANG=$($d['CLANG']) LANG2=$($d['LANG2'])"
+        ($d['LOC'] -eq 'T5-SALALAH' -and $d['AMOUNT'] -eq '77.25' -and $d['CPAY'] -eq '1' `
+         -and $d['PAY1'] -match '20260304/\s*17\.25/BT') `
+        "LOC=$($d['LOC']) AMOUNT=$($d['AMOUNT']) CPAY=$($d['CPAY']) PAY1=$($d['PAY1'])"
 
     # -------------------------------------------------------------- 6
     # Replay an already-applied batch. The ledger guard is deliberately
@@ -234,20 +242,19 @@ COMMIT;
     # -------------------------------------------------------------- 7
     # A write by the apply-back user must never propagate (loop prevention).
     $before = Dump $TESTKEY
-    Sql "UPDATE pocapp.employee SET city='ECHO-CITY' WHERE personnel_id='$TESTKEY'; COMMIT;" "syncapp/syncapp" | Out-Null
+    Sql "UPDATE pocapp.traffic_fine SET location='ECHO-LOC' WHERE fine_no='$TESTKEY'; COMMIT;" "syncapp/syncapp" | Out-Null
     Sync-Once | Out-Null
     $after = Dump $TESTKEY
-    $capLog = Get-Content (Join-Path $poc "sync\capture.log") -Raw -ErrorAction SilentlyContinue
     Check 7 "SYNCAPP writes are filtered out" `
-        ($after['CITY'] -eq $before['CITY'] -and $after['CITY'] -ne 'ECHO-CITY') `
-        "Adabas CITY=$($after['CITY']) (expected unchanged $($before['CITY']))"
+        ($after['LOC'] -eq $before['LOC'] -and $after['LOC'] -ne 'ECHO-LOC') `
+        "Adabas LOC=$($after['LOC']) (expected unchanged $($before['LOC']))"
     # put Oracle back so later assertions are not confused by the echo row
-    Sql "UPDATE pocapp.employee SET city='$($before['CITY'])' WHERE personnel_id='$TESTKEY'; COMMIT;" "syncapp/syncapp" | Out-Null
+    Sql "UPDATE pocapp.traffic_fine SET location='$($before['LOC'])' WHERE fine_no='$TESTKEY'; COMMIT;" "syncapp/syncapp" | Out-Null
 
     # -------------------------------------------------------------- 8
     # Crash mid-batch: apply a batch, kill nothing, but simulate the crash
     # window by re-applying an un-acknowledged batch. Nothing may double.
-    Sql "UPDATE pocapp.employee SET job_title='T8 CRASHTEST' WHERE personnel_id='$TESTKEY'; COMMIT;" | Out-Null
+    Sql "UPDATE pocapp.traffic_fine SET location='T8 CRASHTEST' WHERE fine_no='$TESTKEY'; COMMIT;" | Out-Null
     Start-Sleep -Seconds 12
     $ready = Get-ChildItem (Join-Path $poc "sync\outbox") -Directory -ErrorAction SilentlyContinue |
              Where-Object { Test-Path (Join-Path $_.FullName "_COMPLETE") } | Sort-Object Name | Select-Object -First 1
@@ -267,8 +274,8 @@ COMMIT;
         $flat = ($again -join " ")
         $d = Dump $TESTKEY
         Check 8 "crash mid-batch: re-apply is clean" `
-            ($d['JOB'] -eq 'T8 CRASHTEST' -and $flat -match "ALREADY-APPLIED|NOOP-IDENTICAL") `
-            "JOB=$($d['JOB']); re-apply said: $(($flat -replace '\s+',' ').Trim())"
+            ($d['LOC'] -eq 'T8 CRASHTEST' -and $flat -match "ALREADY-APPLIED|NOOP-IDENTICAL") `
+            "LOC=$($d['LOC']); re-apply said: $(($flat -replace '\s+',' ').Trim())"
         Move-Item $dir (Join-Path $poc "sync\applied\$($ready.Name)") -Force
         Remove-Item -Recurse -Force $ready.FullName
     } else {
@@ -279,9 +286,9 @@ COMMIT;
     # Adabas outage: stop the nucleus, make changes, restart, drain.
     Write-Host "        (stopping Adabas for the outage test...)" -ForegroundColor DarkGray
     docker compose stop adabas | Out-Null
-    Sql "UPDATE pocapp.employee SET city='T9-OUTAGE-1' WHERE personnel_id='$TESTKEY'; COMMIT;" | Out-Null
+    Sql "UPDATE pocapp.traffic_fine SET location='T9-OUTAGE-1' WHERE fine_no='$TESTKEY'; COMMIT;" | Out-Null
     Start-Sleep -Seconds 3
-    Sql "UPDATE pocapp.employee SET city='T9-OUTAGE-2' WHERE personnel_id='$TESTKEY'; COMMIT;" | Out-Null
+    Sql "UPDATE pocapp.traffic_fine SET location='T9-OUTAGE-2' WHERE fine_no='$TESTKEY'; COMMIT;" | Out-Null
     Start-Sleep -Seconds 12
     $queued = (Get-ChildItem (Join-Path $poc "sync\outbox") -Directory -ErrorAction SilentlyContinue).Count
     powershell -File (Join-Path $poc "scripts\lab-up.ps1") | Out-Null
@@ -289,8 +296,8 @@ COMMIT;
     Sync-Once 3 | Out-Null
     $d = Dump $TESTKEY
     Check 9 "Adabas outage: changes queue and drain" `
-        ($queued -ge 1 -and $d['CITY'] -eq 'T9-OUTAGE-2') `
-        "queued=$queued CITY=$($d['CITY'])"
+        ($queued -ge 1 -and $d['LOC'] -eq 'T9-OUTAGE-2') `
+        "queued=$queued LOC=$($d['LOC'])"
 
     # -------------------------------------------------------------- 10
     # Conflict detection is a documented stretch goal (spec 5.4): the

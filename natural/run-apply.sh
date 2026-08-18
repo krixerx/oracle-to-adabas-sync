@@ -5,7 +5,7 @@
 #
 # Stages /sync/inbox/<batch>/ into /sync/work (the Natural programs use
 # fixed work-file paths - Natural CE has no batch mode, so there are no
-# parameters to pass), runs APPLYEMP headlessly, then acknowledges the
+# parameters to pass), runs APPLYFIN headlessly, then acknowledges the
 # batch by RENAMING its directory to /sync/applied or /sync/rejected.
 # The rename is the acknowledgement: atomic on one filesystem, and it is
 # what makes the file protocol a real queue.
@@ -31,10 +31,9 @@ grep -q '^1 = adatcp://adabas:60001' $DBMAP 2>/dev/null || \
   echo '1 = adatcp://adabas:60001' >> $DBMAP
 
 mkdir -p $FUSER/SYNC/SRC $FUSER/SYNC/GP
-cp /poc/natural/APPLYEMP.NSP $FUSER/SYNC/SRC/
+cp /poc/natural/APPLYFIN.NSP $FUSER/SYNC/SRC/
+cp /poc/natural/TRAFFINE.NSD $FUSER/SYNC/SRC/
 cp /poc/natural/LEDGER.NSD   $FUSER/SYNC/SRC/
-cp $FUSER/SAMP4ONE/SRC/EMPLOYEE.NSD $FUSER/SYNC/SRC/
-cp $FUSER/SAMP4ONE/GP/EMPLOYEE.NGD  $FUSER/SYNC/GP/
 
 cd $NATBIN
 ./ftouch lib=SYNC sm -b -d >/dev/null
@@ -44,7 +43,7 @@ cd $NATBIN
 # means "this MU/PE set is empty" (the contract's completeness rule).
 rm -rf /sync/work
 mkdir -p /sync/work
-for f in employee employee_address_line employee_language employee_income; do
+for f in traffic_fine traffic_fine_offence traffic_fine_payment; do
   if [ -f "$INBOX/$f.dat" ]; then
     cp "$INBOX/$f.dat" /sync/work/
   else
@@ -58,8 +57,11 @@ export TERM=xterm
 set +e
 # unique ETID per run: an aborted session leaves a stale ET user in the
 # Adabas user queue and a fixed ETID would then hit resp 48/8
+#
+# The DDMs are re-catalogued every run: CE has no SYSDDM, so this is what
+# makes the library self-healing after `docker compose down -v`.
 ./natural udb=1 madio=0 "etid=A$$" \
-  "stack=(LOGON SYNC;READ LEDGER;CATALOG;RUN APPLYEMP;FIN)" \
+  "stack=(LOGON SYNC;READ LEDGER;CATALOG;READ TRAFFINE;CATALOG;RUN APPLYFIN;FIN)" \
   </dev/null >/tmp/apply-screen.out 2>&1
 rc=$?
 set -e
