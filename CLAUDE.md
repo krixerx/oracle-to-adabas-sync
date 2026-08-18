@@ -40,6 +40,8 @@ Running the sync for real instead of testing it:
 ```bat
 sync-start.cmd                     :: lab + Hop Server + capture and pump, each in its own window
 check-fine.cmd F000000005          :: one record, Oracle and Adabas side by side
+check-vehicle.cmd CITZZ1JZW00000014 :: a vehicle and all of its plate records
+:: Both are READ-ONLY reports - the sync itself is capture + pump.
 ```
 
 `sync-start.cmd` is the whole live path. The pieces it starts, if you want them

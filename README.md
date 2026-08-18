@@ -122,6 +122,7 @@ docker exec -it o2a-oracle sqlplus pocapp/pocapp@//localhost:1521/FREEPDB1
   UPDATE pocapp.traffic_fine SET location = 'MYTEST' WHERE fine_no = 'F000000005';
   COMMIT;
 check-fine.cmd F000000005          :: shows the Oracle row and the Adabas record side by side
+check-vehicle.cmd CITZZ1JZW00000014 :: same, for a vehicle and all of its plate records
 ```
 
 A stage-by-stage walkthrough — the same record seen as an Oracle row, a CSV, a
@@ -189,6 +190,7 @@ the disk.
 sync-verify.cmd              the acceptance suite (10 criteria)
 sync-start.cmd               start capture + pump for interactive use
 check-fine.cmd               show one fine in Oracle and Adabas side by side
+check-vehicle.cmd            same for a vehicle: attributes plus every plate record
 docker-compose.yml           adabas, natural, oracle, hop-server
 CHANGE_FILE_CONTRACT.md      the capture → Hop → Natural interface
 specs/                       the full design: decisions, spikes, open items
