@@ -21,7 +21,8 @@
 *   WF5 apply_result.txt            one line per record + SUMMARY
 *
 * Key behaviours (spec C6):
-*   - op=D deletes (project owner's decision 2026-08-10, POC scope)
+*   - op=D is REFUSED: nothing is ever deleted (2026-08-18, revising
+*     O4). A fine is cancelled - status 'C' - which is an update.
 *   - op=U is a FULL-STATE upsert, never a diff
 *   - COMPARE BEFORE WRITE: identical record => skip, count a no-op.
 *     Terminates echo loops and makes replay safe (decisions D7 / 5.2).
@@ -99,7 +100,7 @@ DEFINE DATA LOCAL
 1 #SAME        (L)
 1 #CNT-APPLIED (I4)
 1 #CNT-SKIPPED (I4)
-1 #CNT-DELETED (I4)
+1 #CNT-REJECT  (I4)
 1 #CNT-STORED  (I4)
 1 #LEDGER-FOUND (L)
 1 #SKIP        (L)
@@ -140,13 +141,22 @@ PERFORM LOAD-CHILDREN
 *
 RD1. READ WORK FILE 1 #REC
   IF #OP = 'D'
-    PERFORM APPLY-DELETE
+    PERFORM REFUSE-DELETE
   ELSE
     PERFORM APPLY-UPSERT
   END-IF
 END-WORK
 *
 * ---- ledger + data committed together ------------------------------
+* A REFUSAL DOES NOT ADVANCE THE WATERMARK. The batch was not applied, so
+* marking it done would make it unretryable - the permanent silent gap the
+* pump's halt-on-failure rule exists to prevent. The batch stays pending,
+* the pump stops, and a human decides.
+IF #CNT-REJECT GT 0
+  COMPRESS 'LEDGER-NOT-ADVANCED batch' #BATCH-NO
+    'was refused' INTO #LINE
+  WRITE WORK FILE 5 VARIABLE #LINE
+ELSE
 IF #LEDGER-FOUND
   FIND L WITH STREAM-ID = 'APPLY'
     LAST-BATCH    := #BATCH-NO
@@ -168,28 +178,28 @@ ELSE
   STORE L
 END-IF
 END TRANSACTION
+END-IF
 *
 COMPRESS 'SUMMARY batch=' #BATCH-NO 'stored=' #CNT-STORED
   'updated=' #CNT-APPLIED 'skipped=' #CNT-SKIPPED
-  'deleted=' #CNT-DELETED INTO #LINE
+  'refused=' #CNT-REJECT INTO #LINE
 WRITE WORK FILE 5 VARIABLE #LINE
 CLOSE WORK FILE 5
 *
 * ====================================================================
-DEFINE SUBROUTINE APPLY-DELETE
-  RESET #FOUND
-  FIND V WITH FINE-NO = #FINE-NO
-    #FOUND := TRUE
-    DELETE
-  END-FIND
-  IF #FOUND
-    ADD 1 TO #CNT-DELETED
-    COMPRESS 'DELETED' #FINE-NO INTO #LINE
-  ELSE
-*   Already absent = already applied. Idempotent by design, not an error.
-    ADD 1 TO #CNT-SKIPPED
-    COMPRESS 'NOOP-DELETE-ABSENT' #FINE-NO INTO #LINE
-  END-IF
+* A fine is NEVER deleted (project owner, 2026-08-18, revising O4):
+* traffic data cannot just be removed, and the model already says how a
+* fine goes away - status 'C', Cancelled, which arrives here as an
+* ordinary update. A delete instruction is therefore either a mistake or
+* a change nobody agreed to, and obeying it would destroy history that
+* Oracle can no longer supply.
+*
+* Refusing is business logic living in Natural, which is precisely what
+* a replication tool writing straight into Adabas would bypass.
+DEFINE SUBROUTINE REFUSE-DELETE
+  ADD 1 TO #CNT-REJECT
+  COMPRESS 'REFUSED-DELETE' #FINE-NO
+    '- a fine is cancelled (status C), never deleted' INTO #LINE
   WRITE WORK FILE 5 VARIABLE #LINE
 END-SUBROUTINE
 *

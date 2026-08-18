@@ -18,6 +18,7 @@ $script:Results = @()
 $TESTKEY = 'F000000005'   # existing fine, has 2 offence codes (MU)
 $NEWKEY  = 'FZZ9999999'   # synthetic, created and removed by test 2/3
 $NEWISN  = 9999999        # source_isn for the synthetic fine (UNIQUE column)
+$VEHKEY  = 'CITZZ1JZW00000014'   # a vehicle with TWO plates = two Adabas records
 
 # ---------------------------------------------------------------- helpers
 function Sql([string]$sql, [string]$user = "pocapp/pocapp") {
@@ -42,6 +43,16 @@ function Dump([string]$key) {
         if ($l -match '^([A-Z0-9]+)=(.*)$') { $map[$Matches[1]] = $Matches[2].Trim() }
         if ($l -match '^NOTFOUND') { $map['NOTFOUND'] = $true }
         if ($l -match '^FOUND') { $map['FOUND'] = $true }
+    }
+    return $map
+}
+
+function DumpVeh([string]$vin) {
+    $out = docker exec o2a-natural sh /poc/natural/run-dump-veh.sh $vin 2>&1
+    $map = @{}
+    foreach ($line in $out) {
+        $l = ($line -replace "`e\[[0-9;]*[a-zA-Z]", "").Trim()
+        if ($l -match '^([A-Z0-9]+)=(.*)$') { $map[$Matches[1]] = $Matches[2].Trim() }
     }
     return $map
 }
@@ -145,6 +156,9 @@ DELETE FROM pocapp.traffic_fine_offence
 DELETE FROM pocapp.traffic_fine_payment
  WHERE fine_id=(SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY');
 DELETE FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY';
+UPDATE pocapp.vehicle SET color='BLANCHE' WHERE vin='$VEHKEY';
+UPDATE pocapp.vehicle_plate SET expiry_date=NULL
+ WHERE vehicle_id=(SELECT vehicle_id FROM pocapp.vehicle WHERE vin='$VEHKEY');
 COMMIT;
 "@ | Out-Null
 
@@ -180,10 +194,41 @@ COMMIT;
         "FOUND=$($d['FOUND']) LOC=$($d['LOC']) STATUS=$($d['STATUS']) OFF1=$($d['OFF1']) AMOUNT=$($d['AMOUNT'])"
 
     # -------------------------------------------------------------- 3
-    Sql "DELETE FROM pocapp.traffic_fine_offence WHERE fine_id=(SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY'); DELETE FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY'; COMMIT;" | Out-Null
+    # NOTHING IS EVER DELETED (2026-08-18, revising O4). A fine goes away by
+    # being CANCELLED - status 'C' - which travels as an ordinary update. The
+    # second half proves the other side of the rule: a physical delete is
+    # REFUSED by the applier rather than obeyed, so history cannot be
+    # destroyed by a mistake in Oracle.
+    Sql "UPDATE pocapp.traffic_fine SET status_code='C', status='Cancelled' WHERE fine_no='$NEWKEY'; COMMIT;" | Out-Null
     Sync-Once | Out-Null
     $d = Dump $NEWKEY
-    Check 3 "delete propagates" ($d['NOTFOUND'] -eq $true) "record still present"
+    $cancelled = ($d['FOUND'] -and $d['STATUS'] -eq 'C')
+
+    # Now the refusal. Driven through run-apply.sh directly rather than the
+    # pump: a refused batch deliberately halts the pump and does NOT advance
+    # the watermark, so letting it into the queue would block every later
+    # test - which is exactly the behaviour being asserted.
+    Sql "DELETE FROM pocapp.traffic_fine_offence WHERE fine_id=(SELECT fine_id FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY'); DELETE FROM pocapp.traffic_fine WHERE fine_no='$NEWKEY'; COMMIT;" | Out-Null
+    Start-Sleep -Seconds 12
+    $delBatch = Get-ChildItem (Join-Path $poc "sync\outbox") -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path (Join-Path $_.FullName "_COMPLETE") } | Sort-Object Name | Select-Object -First 1
+    $refused = $false
+    if ($delBatch) {
+        $inDir = "/sync/outbox/$($delBatch.Name)"; $outDir = "/sync/inbox/$($delBatch.Name)"
+        curl.exe -s -u cluster:cluster --max-time 300 `
+            "http://localhost:8081/hop/execWorkflow/?workflow=/poc/hop/workflows/sync-apply.hwf&runConfig=local&level=Basic&BATCH_IN=$inDir&BATCH_OUT=$outDir" | Out-Null
+        & (Join-Path $poc "scripts\make-batch-info.ps1") $delBatch.Name | Out-Null
+        $out = (docker exec o2a-natural sh /poc/natural/run-apply.sh $delBatch.Name 2>&1) -join " "
+        $refused = ($out -match "REFUSED-DELETE" -and $out -match "LEDGER-NOT-ADVANCED")
+        # discard it: the batch is unappliable by design, and leaving it in the
+        # queue would halt the pump for every later test
+        Remove-Item -Recurse -Force $delBatch.FullName
+        Remove-Item -Recurse -Force (Join-Path $poc "sync\inbox\$($delBatch.Name)") -ErrorAction SilentlyContinue
+    }
+    $stillThere = (Dump $NEWKEY)['FOUND']
+    Check 3 "cancellation propagates; a delete is refused" `
+        ($cancelled -and $refused -and $stillThere) `
+        "cancelled=$cancelled refused=$refused adabasRecordSurvived=$stillThere"
 
     # -------------------------------------------------------------- 4
     # The MU case that silently corrupts if the applier forgets to RESET
@@ -313,6 +358,26 @@ COMMIT;
     # logging, but the applier does not yet compare against it.
     Skip 10 "conflict detected and routed to rejected/" `
         "out of scope this round (spec 5.4) - the before-image is already free from ALL COLUMNS supplemental logging, but the applier does not compare against it yet"
+
+    # -------------------------------------------------------------- 11
+    # The vehicle aggregate, whose shape is the opposite of the fine's:
+    # Adabas file 12 holds ONE RECORD PER PLATE, so one Oracle vehicle is a
+    # SET of Adabas records. A vehicle attribute has to reach every one of
+    # them, while an expiry must land on exactly one.
+    $before = DumpVeh $VEHKEY
+    Sql @"
+UPDATE pocapp.vehicle SET color='T11-VERT' WHERE vin='$VEHKEY';
+UPDATE pocapp.vehicle_plate SET expiry_date=DATE '2026-06-30'
+ WHERE vehicle_id=(SELECT vehicle_id FROM pocapp.vehicle WHERE vin='$VEHKEY') AND plate_seq=2;
+COMMIT;
+"@ | Out-Null
+    Sync-Once | Out-Null
+    $v = DumpVeh $VEHKEY
+    Check 11 "vehicle: attribute hits every plate record, expiry one" `
+        ($v['NPLATES'] -eq '2' -and $v['COLOR1'] -eq 'T11-VERT' -and $v['COLOR2'] -eq 'T11-VERT' `
+         -and $v['EXPIRY1'] -eq '0' -and $v['EXPIRY2'] -eq '20260630' `
+         -and $v['VINFULL2'] -eq ($VEHKEY + '1') -and $v['VEHTYPE1'] -eq $before['VEHTYPE1']) `
+        "n=$($v['NPLATES']) colours=$($v['COLOR1'])/$($v['COLOR2']) expiry=$($v['EXPIRY1'])/$($v['EXPIRY2']) vin2=$($v['VINFULL2']) type=$($v['VEHTYPE1'])"
 
 } finally {
     Stop-Capture $cap

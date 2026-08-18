@@ -10,20 +10,28 @@ No message broker, no polling, no commercial licences. One command:
 sync-verify.cmd
 ```
 
-It ends with **`SYNC VERIFIED: 9/10 (1 skipped by design)`** and exit code 0. The tenth
-criterion is conflict detection — a documented out-of-scope item for this round, not a
-broken test. See [Why 9 and not 10](#why-9-and-not-10).
+It ends with **`SYNC VERIFIED: 10/11 (1 skipped by design)`** and exit code 0. The
+remaining criterion is conflict detection — a documented out-of-scope item for this
+round, not a broken test. See [Why 10 and not 11](#why-10-and-not-11).
 
 > **The other direction lives in a sibling repo:** [`adabas-to-oracle-migration`](https://github.com/krixerx/adabas-to-oracle-migration)
 > — the bulk Adabas → Oracle migration that produces the relational model this sync
 > writes back from. If you are wondering why Oracle holds an Adabas-shaped schema, that
 > repo is the answer.
 
-**What is synchronised:** the **traffic fine** — Adabas file 20 `TRAFFINE`, which Oracle
-holds as `traffic_fine` plus two child tables. It has one multiple-value field (the
-offences seen in a single stop) and one periodic group (part payments), so a single
-aggregate exercises scalar fields, MU and PE occupancy, packed amounts, numeric dates and
-three separate code lookups.
+**What is synchronised:** two aggregates with deliberately different shapes.
+
+- The **traffic fine** — Adabas file 20 `TRAFFINE`, Oracle `traffic_fine` plus two child
+  tables. One multiple-value field (offences from a single stop) and one periodic group
+  (part payments), so it exercises MU and PE occupancy, packed amounts, numeric dates and
+  three reverse code lookups.
+- The **vehicle** — Adabas file 12, which holds **one record per plate**. An Oracle
+  vehicle with three plates is three Adabas records, so writing it back reconciles a set
+  of records rather than occupancy inside one.
+
+**Nothing is ever deleted.** A fine is *cancelled* (status `C`); a registration *expires*
+(`PLATE-EXPIRY`). An `op=D` reaching the applier is **refused** and the batch stops — the
+mainframe's own rule rejecting a write the source allowed.
 
 ## What it demonstrates
 
@@ -121,7 +129,7 @@ fixed-width line and an Adabas record — is in [`TESTING_GUIDE.md`](TESTING_GUI
 including an experiment that breaks the MU/PE shrink on purpose so you can see the
 corruption first-hand.
 
-## Why 9 and not 10
+## Why 10 and not 11
 
 Criterion 10 is conflict detection: the same record changed on both sides inside one
 sync window. It is **out of scope for this round by decision, not unmet by accident**,

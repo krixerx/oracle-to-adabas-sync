@@ -12,7 +12,7 @@ direction.
 | Leg | Directory | Format | Producer | Consumer |
 |---|---|---|---|---|
 | capture → mapping | `sync/outbox/batch-NNNNNN/` | **CSV** | `oracle-capture` | Hop Server |
-| mapping → apply | `sync/inbox/batch-NNNNNN/` | **fixed-width** | Hop Server | `APPLYFIN` |
+| mapping → apply | `sync/inbox/batch-NNNNNN/` | **fixed-width** | Hop Server | `APPLYFIN`, `APPLYVEH` |
 
 The split is deliberate (open decision O3, decided 2026-08-10). Hop reads CSV natively,
 so the capture leg keeps symmetry with the migration lab. Natural's `READ WORK FILE <structure>`
@@ -39,6 +39,8 @@ sync/inbox/batch-000042/      produced by Hop (same batch number)
     traffic_fine.dat
     traffic_fine_offence.dat
     traffic_fine_payment.dat
+    vehicle.dat
+    vehicle_plate.dat
     batch_info.dat
     _COMPLETE                 written LAST
 
@@ -56,11 +58,19 @@ Two rules make files a real queue rather than a hopeful one:
 Batch numbers increase monotonically and are never reused. The applier refuses any batch
 whose number is not greater than the ledger watermark, so ordering violations fail closed.
 
-⚠️ **`vehicle.csv` / `vehicle_plate.csv` are captured but not yet applied.** The capture
-engine knows the vehicle aggregate, so the files appear in every batch; there is no Hop
-pipeline and no Natural applier for them yet, and a vehicle change would therefore be
-carried this far and then dropped. Wiring them is tracked in the spec; until then the
-scope lever (`table.include.list`) is what decides whether such a change is even captured.
+## Nothing is ever deleted
+
+Revising decision O4 (2026-08-18). Traffic data cannot simply be removed, and both
+aggregates already express removal without destroying anything:
+
+- a **fine** is *cancelled* — `status_code = 'C'` — which travels as an ordinary update;
+- a **registration** *expires* — `PLATE-EXPIRY`, numeric YYYYMMDD, `00000000` while current.
+
+So `op=D` has no legitimate meaning on this leg. Both appliers **refuse** it, report
+`REFUSED-DELETE`, and **do not advance the ledger watermark** — the batch was not applied,
+so marking it done would make it unretryable. The pump then halts and a human decides.
+That refusal is business logic living in Natural, which is exactly what a replication
+product writing straight into Adabas would bypass.
 
 ---
 
@@ -142,6 +152,47 @@ For `op=D` only `op` and `fine_no` are meaningful; the rest is space-filled.
 | 22 | 8 | `paid_amount` | `PAY-AMT(i)` P7.2, text with decimal point |
 | 30 | 2 | `method_adabas` | `PAY-METH(i)` A2, reversed from the description |
 
+### `vehicle.dat` — 108 bytes  ·  Adabas file 12
+
+| Offset | Len | Field | Adabas | Notes |
+|---:|---:|---|---|---|
+| 1 | 1 | `op` | — | `U`; `D` is refused |
+| 2 | 17 | `vin` | — | **base** VIN, the aggregate key. NOT written to Adabas |
+| 19 | 8 | `owner_national_id` | `PERSONNEL-ID` A8 | |
+| 27 | 20 | `make` | `MAKE` A20 | |
+| 47 | 20 | `model` | `MODEL` A20 | |
+| 67 | 10 | `color` | `COLOR` A10 | |
+| 77 | 4 | `year_built` | `YEAR` U4 | zero-padded |
+| 81 | 8 | `veh_type_adabas` | `VEH-TYPE` A8 | legacy code — **lineage first**, reverse map only as fallback |
+| 89 | 20 | `source_fuel_desc` | `FUEL-DESC` A20 | free text, verbatim |
+
+⚠️ **`VIN` is never written back.** Adabas stores base+suffix (A25) and Oracle knows only
+the 17-character base; the suffix encodes "another plate for this car" and belongs to the
+Adabas record. Writing the base VIN back would destroy it.
+
+### `vehicle_plate.dat` — 53 bytes  ·  one row = one Adabas RECORD
+
+| Offset | Len | Field | Adabas |
+|---:|---:|---|---|
+| 1 | 17 | `parent_key` | the vehicle's base VIN |
+| 18 | 3 | `occurrence_index` | N, zero-padded — plate 1..3 |
+| 21 | 15 | `plate_no` | `REG-NUM` A15 — **the match key**, `DE,UQ` |
+| 36 | 10 | `source_isn` | lineage/evidence only, **advisory** |
+| 46 | 8 | `expiry_date` | `PLATE-EXPIRY` U8, `00000000` = still current |
+
+⚠️ **This file is not an MU/PE set — it is a set of RECORDS.** Adabas file 12 holds one
+record per plate, so an Oracle vehicle with three plates is three Adabas records, each
+repeating the vehicle's own attributes.
+
+⚠️ **Matched on `plate_no`, not `source_isn`.** ISNs are never reused *within one
+database*, but they are assigned at STORE and therefore differ between environments: the
+same plate is ISN 806 in this lab and 807 in the migration lab it was seeded from. A GET
+on the recorded ISN fails outright — or, worse in production, updates whatever record
+happens to hold that ISN. `REG-NUM` is a unique descriptor and cannot drift, so it is the
+key; the ISN is carried as evidence. A plate number with no matching record is a **new
+registration** and is stored, because under the no-delete rule a plate is never renamed in
+place.
+
 ### `batch_info.dat` — 21 bytes
 
 | Offset | Len | Field | Type |
@@ -163,6 +214,7 @@ The reverse of the migration lab, using the **same** `CODE_LOOKUP` table:
 | `STATUS` | description → code (`'Appealed'` → `'A'`), domain `FINE_STATUS` |
 | `OFFENCE_DESC` | description → code (`'Illegal parking'` → `'PARK'`), domain `OFFENCE` |
 | `METHOD` | description → code (`'Bank transfer'` → `'BT'`), domain `PAY_METHOD` |
+| `VEHICLE_TYPE_CODE` | standard → legacy code via `VEHICLE_TYPE_MAP` — **fallback only**, see below |
 | dates, amounts | already textual from the capture SQL — Hop only pads them |
 | numeric padding | left-zero-pad `occurrence_index`, `batch_no`, `end_scn` |
 | string padding | right-space-pad to the layout width, truncate to Adabas field length |
@@ -172,6 +224,13 @@ keeps both (`status` + `status_code`), so the code could simply be copied. Resol
 description independently is what a real synchroniser does — the description is the value
 a user edits — and it makes a drift between the two visible instead of silently writing
 whichever one happened to be picked.
+
+**The vehicle type reversal is lossy and must not be trusted.** SEDAN, ESTATE and HATCH
+all map to `PC`, so `PC` does not identify the code it came from. The migration kept the
+original in `source_vehicle_type` precisely so the round trip need not guess: that column
+is authoritative and exact, and the reverse map is consulted **only** when there is no
+lineage value — a vehicle created in Oracle that never had a legacy code. Letting the map
+win over a known original would silently rewrite SEDAN as ESTATE.
 
 ### Deliberately NOT carried to Adabas
 

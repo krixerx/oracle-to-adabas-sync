@@ -31,11 +31,12 @@ Success looks like:
   PASS   9. Adabas outage: changes queue and drain
   SKIP  10. conflict detected and routed to rejected/
         out of scope this round (spec 5.4)
+  PASS  11. vehicle: attribute hits every plate record, expiry one
 
-SYNC VERIFIED: 9/10   (1 skipped by design)
+SYNC VERIFIED: 10/11   (1 skipped by design)
 ```
 
-**9/10 is the expected, correct result, and the suite exits 0.** Criterion 10 is conflict
+**10/11 is the expected, correct result, and the suite exits 0.** Criterion 10 is conflict
 detection, deferred to round 3 by decision (spec O2, design in 5.4). It is reported as
 SKIP rather than FAIL so the printed result and the exit code agree. Everything built is
 passing.
@@ -388,7 +389,7 @@ lab dies quietly.
 
 ## 10. Suggested plan for a session
 
-1. `sync-verify.cmd` once — see `SYNC VERIFIED: 9/10` end to end (~8 min).
+1. `sync-verify.cmd` once — see `SYNC VERIFIED: 10/11` end to end (~8 min).
 2. Work through §2 stage by stage on one change. This is the core of the learning: you
    see the same record as CSV, as fixed-width, and as an Adabas record.
 3. Run capture + `sync-pump.ps1 -Watch` and type a few `UPDATE`s. Watch the latency.

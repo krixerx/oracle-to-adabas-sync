@@ -30,6 +30,11 @@ $newFields = @(
     @{ code = "BA"; def = "01,BA,25,A,NU"; label = "VIN (A25)" }
     @{ code = "BB"; def = "01,BB,8,A,NU";  label = "VEH-TYPE (A8)" }
     @{ code = "BC"; def = "01,BC,20,A,NU"; label = "FUEL-DESC (A20)" }
+    # A registration is never deleted - it EXPIRES. The legacy file has no such
+    # field (AJ is DATE-ACQ, acquisition, a different fact that must not be
+    # repurposed), so the lab adds one. U8 numeric YYYYMMDD, matching AJ and the
+    # traffic-fine dates; NU, so "no value" means the plate is still current.
+    @{ code = "BD"; def = "01,BD,8,U,NU";   label = "PLATE-EXPIRY (U8, YYYYMMDD)" }
 )
 
 $fdt = docker exec o2a-adabas sh -lc "adarep db=1 fdt file=12" 2>&1

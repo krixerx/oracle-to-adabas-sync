@@ -1,0 +1,70 @@
+* DUMPVEH - dumps every VEHICLES record sharing one base VIN, so the
+* test harness can assert on Adabas state from outside.
+*
+* Reads the 17-character base VIN from /sync/work/dump_key.txt. The file
+* holds one record PER PLATE, so a vehicle is a SET of records and the
+* dump has to show all of them - which is why this reads the whole file
+* rather than doing a keyed lookup: VIN is not a descriptor (adding one
+* would need an ADAINV pass on a loaded file).
+*
+* Deliberately a SEPARATE program from APPLYVEH, reading Adabas
+* directly: an assertion that went through the applier's own bookkeeping
+* could pass by the pipeline agreeing with itself.
+*
+* No terminal WRITE (headless); output goes to work file 5.
+DEFINE DATA LOCAL
+1 V VIEW OF VEHICLES
+  2 REG-NUM
+  2 PERSONNEL-ID
+  2 MAKE
+  2 MODEL
+  2 COLOR
+  2 YEAR
+  2 VIN
+  2 VEH-TYPE
+  2 FUEL-DESC
+  2 PLATE-EXPIRY
+1 #KEY   (A17)
+1 #LINE  (A) DYNAMIC
+1 #N     (I4)
+1 #VIN17 (A17)
+END-DEFINE
+*
+DEFINE WORK FILE 6 '/sync/work/dump_key.txt' TYPE 'ASCII'
+DEFINE WORK FILE 5 '/sync/work/dump_result.txt' TYPE 'ASCII'
+*
+READ WORK FILE 6 ONCE #KEY
+*
+RESET #N
+READ V BY ISN
+  #VIN17 := SUBSTRING(V.VIN,1,17)
+  IF #VIN17 = #KEY
+    ADD 1 TO #N
+    COMPRESS 'FOUND' #N INTO #LINE
+    WRITE WORK FILE 5 VARIABLE #LINE
+    COMPRESS 'ISN' #N '=' *ISN INTO #LINE LEAVING NO SPACE
+    WRITE WORK FILE 5 VARIABLE #LINE
+    COMPRESS 'PLATE' #N '=' REG-NUM INTO #LINE LEAVING NO SPACE
+    WRITE WORK FILE 5 VARIABLE #LINE
+    COMPRESS 'VINFULL' #N '=' V.VIN INTO #LINE LEAVING NO SPACE
+    WRITE WORK FILE 5 VARIABLE #LINE
+    COMPRESS 'EXPIRY' #N '=' PLATE-EXPIRY INTO #LINE LEAVING NO SPACE
+    WRITE WORK FILE 5 VARIABLE #LINE
+    COMPRESS 'COLOR' #N '=' COLOR INTO #LINE LEAVING NO SPACE
+    WRITE WORK FILE 5 VARIABLE #LINE
+    COMPRESS 'VEHTYPE' #N '=' VEH-TYPE INTO #LINE LEAVING NO SPACE
+    WRITE WORK FILE 5 VARIABLE #LINE
+    COMPRESS 'OWNER' #N '=' PERSONNEL-ID INTO #LINE LEAVING NO SPACE
+    WRITE WORK FILE 5 VARIABLE #LINE
+  END-IF
+END-READ
+*
+COMPRESS 'NPLATES=' #N INTO #LINE LEAVING NO SPACE
+WRITE WORK FILE 5 VARIABLE #LINE
+IF #N = 0
+  COMPRESS 'NOTFOUND' #KEY INTO #LINE
+  WRITE WORK FILE 5 VARIABLE #LINE
+END-IF
+CLOSE WORK FILE 5
+*
+END

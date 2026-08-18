@@ -1,0 +1,290 @@
+* APPLYVEH - sync apply API for VEHICLES (Adabas file 12).
+*
+* Companion to APPLYFIN, and deliberately a DIFFERENT SHAPE. The fine
+* aggregate is one Oracle root -> one Adabas record, with MU/PE
+* occupancy inside it. This one is not:
+*
+*   ADABAS FILE 12 HOLDS ONE RECORD PER PLATE. The legacy file has
+*   nowhere to record a second registration, so a vehicle with two
+*   plates was registered AGAIN under the same VIN with a character
+*   appended and a different REG-NUM. Oracle turned that into one
+*   vehicle plus up to three plate rows. Writing it back therefore
+*   reconciles a SET OF RECORDS, and every one of those records repeats
+*   the vehicle's own attributes (make, model, colour, ...).
+*
+* What makes it tractable: vehicle_plate.SOURCE_ISN survived the
+* migration, so each plate row still names the Adabas record it came
+* from. ROP confirmed ISNs are NEVER REUSED, so that reference stays
+* valid for ever - it is the lineage key, and this program reads by it.
+*
+* NOTHING IS EVER DELETED (project owner, 2026-08-18, revising O4):
+* a registration is not removed, it EXPIRES - field BD PLATE-EXPIRY,
+* numeric YYYYMMDD, 0 while the plate is current. An op=D therefore has
+* no legitimate meaning here and is REFUSED rather than obeyed; the
+* batch is left for a human. That refusal is business logic, and it is
+* the whole argument for applying through Natural rather than writing
+* into Adabas directly.
+*
+* VIN IS NEVER OVERWRITTEN. Adabas stores base+suffix (A25); Oracle
+* knows only the 17-character base. The suffix encodes "another plate
+* for this car" and belongs to the Adabas record, not to the Oracle
+* vehicle, so writing the base VIN back would destroy it.
+*
+* Input work files (staged into /sync/work by run-apply.sh):
+*   WF1 vehicle.dat              parent records (attributes)
+*   WF2 vehicle_plate.dat        one row per plate = one Adabas record
+*   WF6 batch_info.dat           batch number + end SCN
+* Output:
+*   WF5 apply_result_veh.txt     one line per record + SUMMARY
+*
+* Headless: NO terminal WRITE statements (would trip the MORE prompt).
+DEFINE DATA LOCAL
+1 V VIEW OF VEHICLES
+  2 REG-NUM
+  2 PERSONNEL-ID
+  2 MAKE
+  2 MODEL
+  2 COLOR
+  2 YEAR
+  2 VIN
+  2 VEH-TYPE
+  2 FUEL-DESC
+  2 PLATE-EXPIRY
+1 L VIEW OF LEDGER
+  2 STREAM-ID
+  2 LAST-BATCH
+  2 LAST-SCN
+  2 APPLIED-UTC
+  2 ROWS-APPLIED
+  2 ROWS-SKIPPED
+  2 ROWS-REJECTED
+*
+* ---- parent record layout (108 bytes) ------------------------------
+1 #REC
+  2 #OP        (A1)
+  2 #VIN       (A17)
+  2 #OWNER     (A8)
+  2 #MAKE      (A20)
+  2 #MODEL     (A20)
+  2 #COLOR     (A10)
+  2 #YEAR      (N4)
+  2 #VEH-TYPE  (A8)
+  2 #FUEL-DESC (A20)
+* ---- plate record layout (53 bytes) --------------------------------
+1 #PLT-REC
+  2 #PLT-KEY    (A17)
+  2 #PLT-IDX    (N3)
+  2 #PLT-NO     (A15)
+  2 #PLT-ISN    (N10)
+* N8, not A8: the mapping writes 00000000 for a current plate, so the
+* field is always eight digits and READ WORK FILE converts it directly.
+* (An alphanumeric here would need VAL, which this program will not
+* compile - NAT1320 - even though APPLYFIN uses it happily.)
+  2 #PLT-EXP8   (N8)
+1 #BATCH-REC
+  2 #BATCH-NO (N6)
+  2 #END-SCN  (N15)
+*
+1 #PLT-NO-A   (A15/1:3)
+1 #PLT-ISN-A  (N10/1:3)
+1 #PLT-EXP-A  (N8/1:3)
+1 #PLT-CNT    (I4)
+*
+1 #LINE        (A) DYNAMIC
+1 #I           (I4)
+1 #FOUND       (L)
+1 #SAME        (L)
+1 #CNT-APPLIED (I4)
+1 #CNT-SKIPPED (I4)
+1 #CNT-STORED  (I4)
+1 #CNT-REJECT  (I4)
+1 #LEDGER-FOUND (L)
+1 #SKIP        (L)
+1 #SUF         (A1)
+END-DEFINE
+*
+DEFINE WORK FILE 6 '/sync/work/batch_info.dat' TYPE 'ASCII'
+* Its OWN result file, not the one APPLYFIN writes: both appliers run in
+* the same Natural session, and sharing the path would have the second to
+* open it truncate the first one's report. run-apply.sh cats both.
+DEFINE WORK FILE 5 '/sync/work/apply_result_veh.txt' TYPE 'ASCII'
+DEFINE WORK FILE 1 '/sync/work/vehicle.dat' TYPE 'ASCII'
+DEFINE WORK FILE 2 '/sync/work/vehicle_plate.dat' TYPE 'ASCII'
+*
+RESET #SKIP
+READ WORK FILE 6 ONCE #BATCH-REC
+*
+* ---- guard: never apply a batch at or below the watermark ----------
+* Shares the ledger stream with APPLYFIN: one batch is one unit of work
+* whatever aggregates it carries, so there is ONE watermark, not one
+* per aggregate. Two streams would let a batch be half-applied.
+RESET #LEDGER-FOUND
+FIND L WITH STREAM-ID = 'APPLY'
+  #LEDGER-FOUND := TRUE
+  IF LAST-BATCH GE #BATCH-NO
+    #SKIP := TRUE
+  END-IF
+END-FIND
+*
+IF #SKIP
+  COMPRESS 'ALREADY-APPLIED-VEH batch' #BATCH-NO
+    'is not newer than the ledger' INTO #LINE
+  WRITE WORK FILE 5 VARIABLE #LINE
+  CLOSE WORK FILE 5
+  ESCAPE ROUTINE
+END-IF
+*
+PERFORM LOAD-PLATES
+*
+RD1. READ WORK FILE 1 #REC
+  IF #OP = 'D'
+    PERFORM REFUSE-DELETE
+  ELSE
+    PERFORM APPLY-VEHICLE
+  END-IF
+END-WORK
+*
+COMPRESS 'SUMMARY-VEH batch=' #BATCH-NO 'stored=' #CNT-STORED
+  'updated=' #CNT-APPLIED 'skipped=' #CNT-SKIPPED
+  'rejected=' #CNT-REJECT INTO #LINE
+WRITE WORK FILE 5 VARIABLE #LINE
+CLOSE WORK FILE 5
+*
+* A refusal does NOT terminate the session: APPLYFIN still has to run and
+* write the ledger for this batch. run-apply.sh reads the count out of the
+* report and sets the exit code, which is what routes the batch to
+* rejected/ and halts the pump.
+*
+* ====================================================================
+* A registration is never deleted, so a delete instruction is either a
+* mistake or a change nobody agreed to. Refusing is the correct answer:
+* the batch stops, a human looks, and no history is destroyed.
+DEFINE SUBROUTINE REFUSE-DELETE
+  ADD 1 TO #CNT-REJECT
+  COMPRESS 'REFUSED-DELETE' #VIN
+    '- a registration expires, it is never deleted' INTO #LINE
+  WRITE WORK FILE 5 VARIABLE #LINE
+END-SUBROUTINE
+*
+* ====================================================================
+* One Oracle vehicle = every Adabas record whose plate row names it.
+DEFINE SUBROUTINE APPLY-VEHICLE
+  FOR #I = 1 TO #PLT-CNT
+    RESET #FOUND
+*   MATCHED ON THE PLATE NUMBER, NOT THE ISN - a correction, not a
+*   shortcut.
+*
+*   The design said SOURCE_ISN was the lineage key: ROP confirmed ISNs
+*   are never reused, so it should be stable for ever. It is - WITHIN
+*   ONE DATABASE. This lab proved the caveat the hard way. Its Oracle
+*   seed is a snapshot taken from the migration lab, while its Adabas is
+*   seeded independently, and Adabas assigns an ISN at STORE: the same
+*   plate is ISN 806 here and 807 there. A GET on the recorded ISN then
+*   fails with NAT3113 - or, far worse in production, silently updates
+*   whatever record happens to hold that ISN.
+*
+*   REG-NUM is a UNIQUE DESCRIPTOR (DE,UQ) in the FDT: it is the file's
+*   real key, it is indexed, and it cannot drift between environments.
+*   The ISN stays in the change file as evidence, but it is advisory.
+    FIND V WITH REG-NUM = #PLT-NO-A(#I)
+      #FOUND := TRUE
+      PERFORM COMPARE-RECORD
+      IF #SAME
+        ADD 1 TO #CNT-SKIPPED
+        COMPRESS 'NOOP-IDENTICAL' #PLT-NO-A(#I) INTO #LINE
+        WRITE WORK FILE 5 VARIABLE #LINE
+      ELSE
+        PERFORM MOVE-FIELDS
+        UPDATE
+        ADD 1 TO #CNT-APPLIED
+        COMPRESS 'UPDATED' #PLT-NO-A(#I) INTO #LINE
+        WRITE WORK FILE 5 VARIABLE #LINE
+      END-IF
+    END-FIND
+*
+*   No record under that plate number means a NEW REGISTRATION. Under
+*   the no-delete rule that is the only way a new plate number can
+*   appear: an old registration is expired and a new one issued - a
+*   plate is never renamed in place.
+    IF NOT #FOUND
+      PERFORM STORE-NEW-PLATE
+    END-IF
+  END-FOR
+* ONE transaction per vehicle, not per record: the records that share a
+* base VIN are one logical thing, and committing them separately would
+* leave a vehicle whose plates disagree about its colour.
+*
+* Note this ET is NOT the one that writes the ledger - APPLYFIN does
+* that, later in the same session. A crash in between leaves vehicle
+* data applied but the batch unmarked, so it is simply re-applied, and
+* compare-before-write makes that a no-op.
+  END TRANSACTION
+END-SUBROUTINE
+*
+* ====================================================================
+* A plate created in Oracle has no Adabas record yet. It becomes a new
+* record carrying the SAME base VIN with a suffix - the legacy encoding
+* of "another plate for this car", reproduced deliberately rather than
+* invented: an unsuffixed duplicate would collide on nothing (VIN has no
+* unique index) and would silently become a second vehicle downstream.
+DEFINE SUBROUTINE STORE-NEW-PLATE
+  RESET V
+  MOVE EDITED #PLT-IDX (EM=9) TO #SUF
+  COMPRESS #PLT-KEY #SUF INTO V.VIN LEAVING NO SPACE
+  PERFORM MOVE-FIELDS
+  STORE V
+  ADD 1 TO #CNT-STORED
+  COMPRESS 'STORED' #PLT-NO-A(#I) 'vin=' V.VIN INTO #LINE
+  WRITE WORK FILE 5 VARIABLE #LINE
+END-SUBROUTINE
+*
+* ====================================================================
+* Compared AFTER mapping - Adabas values against Adabas values in one
+* type system. VIN is NOT compared: Adabas holds base+suffix and Oracle
+* only the base, so they never match and every record would look dirty.
+DEFINE SUBROUTINE COMPARE-RECORD
+  #SAME := TRUE
+  IF REG-NUM NE #PLT-NO-A(#I) OR PERSONNEL-ID NE #OWNER
+    #SAME := FALSE
+  END-IF
+  IF MAKE NE #MAKE OR MODEL NE #MODEL OR COLOR NE #COLOR
+    #SAME := FALSE
+  END-IF
+  IF YEAR NE #YEAR OR VEH-TYPE NE #VEH-TYPE
+    #SAME := FALSE
+  END-IF
+  IF FUEL-DESC NE #FUEL-DESC
+    #SAME := FALSE
+  END-IF
+  IF PLATE-EXPIRY NE #PLT-EXP-A(#I)
+    #SAME := FALSE
+  END-IF
+END-SUBROUTINE
+*
+* ====================================================================
+DEFINE SUBROUTINE MOVE-FIELDS
+  REG-NUM      := #PLT-NO-A(#I)
+  PERSONNEL-ID := #OWNER
+  MAKE         := #MAKE
+  MODEL        := #MODEL
+  COLOR        := #COLOR
+  YEAR         := #YEAR
+  VEH-TYPE     := #VEH-TYPE
+  FUEL-DESC    := #FUEL-DESC
+* 0 means the plate is current. Written unconditionally, so clearing an
+* expiry in Oracle un-expires the registration here too.
+  PLATE-EXPIRY := #PLT-EXP-A(#I)
+END-SUBROUTINE
+*
+* ====================================================================
+DEFINE SUBROUTINE LOAD-PLATES
+  RESET #PLT-CNT
+  RD2. READ WORK FILE 2 #PLT-REC
+    ADD 1 TO #PLT-CNT
+    #PLT-NO-A(#PLT-CNT)  := #PLT-NO
+    #PLT-ISN-A(#PLT-CNT) := #PLT-ISN
+    #PLT-EXP-A(#PLT-CNT) := #PLT-EXP8
+  END-WORK
+END-SUBROUTINE
+*
+END

@@ -120,6 +120,11 @@ CREATE TABLE pocapp.vehicle_plate (
                                                  -- vehicle with no registration number
                                                  -- (found 2026-08-05, ISN 158)
   source_isn  NUMBER      NOT NULL,              -- the duplicate row this plate came from
+  -- A registration is never deleted, it EXPIRES: NULL means still current.
+  -- From Adabas BD PLATE-EXPIRY (numeric YYYYMMDD), which the lab added to
+  -- file 12 - the legacy file had no such field, and AJ DATE-ACQ is a
+  -- different fact that must not be repurposed.
+  expiry_date DATE,
   CONSTRAINT pk_vehicle_plate      PRIMARY KEY (vehicle_id, plate_seq),
   CONSTRAINT ck_vehicle_plate_seq  CHECK (plate_seq BETWEEN 1 AND 3),
   CONSTRAINT uq_vehicle_plate_isn  UNIQUE (source_isn),

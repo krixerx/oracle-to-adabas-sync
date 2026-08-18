@@ -32,7 +32,9 @@ grep -q '^1 = adatcp://adabas:60001' $DBMAP 2>/dev/null || \
 
 mkdir -p $FUSER/SYNC/SRC $FUSER/SYNC/GP
 cp /poc/natural/APPLYFIN.NSP $FUSER/SYNC/SRC/
+cp /poc/natural/APPLYVEH.NSP $FUSER/SYNC/SRC/
 cp /poc/natural/TRAFFINE.NSD $FUSER/SYNC/SRC/
+cp /poc/natural/VEHICLES.NSD $FUSER/SYNC/SRC/
 cp /poc/natural/LEDGER.NSD   $FUSER/SYNC/SRC/
 
 cd $NATBIN
@@ -43,7 +45,7 @@ cd $NATBIN
 # means "this MU/PE set is empty" (the contract's completeness rule).
 rm -rf /sync/work
 mkdir -p /sync/work
-for f in traffic_fine traffic_fine_offence traffic_fine_payment; do
+for f in traffic_fine traffic_fine_offence traffic_fine_payment vehicle vehicle_plate; do
   if [ -f "$INBOX/$f.dat" ]; then
     cp "$INBOX/$f.dat" /sync/work/
   else
@@ -60,8 +62,13 @@ set +e
 #
 # The DDMs are re-catalogued every run: CE has no SYSDDM, so this is what
 # makes the library self-healing after `docker compose down -v`.
+#
+# BOTH appliers run in ONE Natural session, and APPLYFIN runs LAST because it
+# is the one that writes the ledger: the watermark must move after the work,
+# not before it. A batch can carry both aggregates, and splitting them across
+# two sessions would let one commit while the other failed.
 ./natural udb=1 madio=0 "etid=A$$" \
-  "stack=(LOGON SYNC;READ LEDGER;CATALOG;READ TRAFFINE;CATALOG;RUN APPLYFIN;FIN)" \
+  "stack=(LOGON SYNC;READ LEDGER;CATALOG;READ TRAFFINE;CATALOG;READ VEHICLES;CATALOG;RUN APPLYVEH;RUN APPLYFIN;FIN)" \
   </dev/null >/tmp/apply-screen.out 2>&1
 rc=$?
 set -e
@@ -72,7 +79,16 @@ if [ $rc -ne 0 ] || [ ! -f /sync/work/apply_result.txt ]; then
   exit 1
 fi
 
+[ -f /sync/work/apply_result_veh.txt ] && cat /sync/work/apply_result_veh.txt
 cat /sync/work/apply_result.txt
+
+# A refusal is a deliberate outcome, not a crash: APPLYVEH reports it and
+# keeps going so the ledger still moves. The exit code is set HERE, and it
+# is what sends the batch to rejected/ and halts the pump.
+if grep -q 'REFUSED-\|REJECTED-' /sync/work/apply_result_veh.txt 2>/dev/null; then
+  echo "APPLY REFUSED something in $BATCH - see above"
+  exit 1
+fi
 exit 0
 
 # NOTE - where the acknowledgement happens, and why it is not here.

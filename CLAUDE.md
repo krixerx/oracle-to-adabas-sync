@@ -12,12 +12,12 @@ polling, no commercial licences.
 The acceptance criterion is the last line of the suite:
 
 ```bat
-sync-verify.cmd     :: ends "SYNC VERIFIED: 9/10 (1 skipped by design)", exit 0
+sync-verify.cmd     :: ends "SYNC VERIFIED: 10/11 (1 skipped by design)", exit 0
 ```
 
-**9/10 is a passing run.** Criterion 10 is conflict detection — out of scope for this
+**10/11 is a passing run.** Criterion 10 is conflict detection — out of scope for this
 round *by decision*, so it reports `SKIP` and does not fail the run. Do not "fix" it into
-a failure, and do not quietly renumber the criteria to make it look like 9/9.
+a failure, and do not quietly renumber the criteria to make it look like 10/10.
 
 The opposite direction (bulk Adabas → Oracle) is the sibling repo
 `adabas-to-oracle-migration`; this one writes back into the model that one produces.
@@ -90,6 +90,7 @@ What has to be rebuilt or restarted after an edit:
 | `hop/pipelines/*.hpl`, `hop/workflows/*.hwf` | nothing — Hop Server reads them off the bind mount per run |
 | `hop/project-config.json`, `docker-compose.yml` | `docker compose --profile sync up -d hop-server` |
 | `natural/*.NSP`, `*.NSD` | nothing — `run-apply.sh` re-copies and `ftouch`es the sources every run |
+| the Adabas FDT (a new field) | `scripts/seed-source.ps1` **and** the sibling repo's copy, then `lab-up.ps1` |
 | `oracle-init/*.sql` | `docker compose down -v`, or apply the DDL by hand (see below) |
 
 ## Where each concern lives
@@ -122,19 +123,29 @@ X in full with ordinary SQL. Do not "optimise" this into reconstructing state fr
 `FINE_NO`. One aggregate covers scalars, MU, PE, packed amounts, numeric dates and three
 code lookups.
 
-**`AggregateDef.VEHICLE` is defined but NOT enabled** — deliberately. It is absent from
-`all()` and its tables are absent from `table.include.list`, because it has no Hop
-pipeline and no Natural applier. An aggregate captured with nowhere to be applied is not
-half-finished, it is **silently dropped at the mapping stage**, which looks exactly like a
-working sync until someone checks Adabas. Enabling it means adding it in both places at
-once, plus the pipeline and the applier — the worked example of "a new aggregate" below.
+**Both aggregates are live**, and their shapes are deliberately opposite:
 
-⚠️ The vehicle leg is also *structurally* different, which is why it was not just switched
-on: Adabas file 12 holds **one record per plate** (the same VIN re-registered with a
-suffix), so an Oracle vehicle with three plates is three Adabas records. Writing it back
-reconciles a set of records, not occupancy inside one — and plate *removal* has no clean
-answer yet, since VIN is not a descriptor and a removed plate takes its `SOURCE_ISN` with
-it.
+| | fine | vehicle |
+|---|---|---|
+| Adabas | file 20 `TRAFFINE`, ONE record | file 12, **one record PER PLATE** |
+| children | MU offences + PE payments *inside* the record | a SET of records, each repeating the vehicle's attributes |
+| match key | `FINE-NO` (`DE,UQ`) | `REG-NUM` (`DE,UQ`) — **not** the ISN |
+| applier | `APPLYFIN` | `APPLYVEH` |
+
+**Nothing is ever deleted** (2026-08-18, revising O4). A fine is *cancelled*
+(`status_code='C'`), a registration *expires* (`PLATE-EXPIRY`, `00000000` = current).
+`op=D` is **refused** by both appliers: they report `REFUSED-DELETE`, leave the record
+alone, and **do not advance the ledger watermark**, so the batch stays retryable and the
+pump halts. Refusing is business logic in Natural — the thing a replication product
+writing straight into Adabas cannot do.
+
+⚠️ **Plates are matched on `REG-NUM`, and `SOURCE_ISN` is advisory.** The design said the
+ISN was the lineage key (ROP: never reused), and within one database it is. But it is
+assigned at STORE, so it differs between environments — in this lab the same plate is ISN
+806 while Oracle's seed, snapshotted from the migration lab, says 807. A `GET` on the
+recorded ISN fails with NAT3113, or in production silently updates whatever record holds
+that ISN. A plate number with no matching record is a **new registration** and is stored;
+under the no-delete rule a plate is never renamed in place.
 
 ## Invariants — breaking these corrupts data silently
 
@@ -157,6 +168,9 @@ it.
   have gaps after deletes; Adabas occurrences must be dense.
 - **The ledger is written in the same Adabas `ET` as the data change**, so "applied but
   not recorded" cannot happen. Keep any new apply path inside that transaction.
+- **A refusal must not advance the watermark.** `op=D` is refused, and the ledger is left
+  where it was — marking a batch done that was never applied would make it unretryable,
+  which is the same permanent silent gap the pump's halt-on-failure rule exists to prevent.
 - **Loop prevention is two-layer**: originator filter at capture (efficiency — echoes
   never cost a round trip) plus compare-before-write at apply (safety — it terminates a
   loop even if the filter is misconfigured). Keep both; the no-op counter is the

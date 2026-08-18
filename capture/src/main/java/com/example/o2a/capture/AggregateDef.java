@@ -192,8 +192,13 @@ public final class AggregateDef {
                     "YEAR_BUILT", "SOURCE_VEHICLE_TYPE", "VEHICLE_TYPE_CODE",
                     "SOURCE_FUEL_DESC"),
             List.of(new Child("VEHICLE_PLATE", "PLATE_SEQ",
-                    List.of("PLATE_NO", "SOURCE_ISN"),
-                    "PLATE_NO, SOURCE_ISN")),
+                    List.of("PLATE_NO", "SOURCE_ISN", "EXPIRY_DATE"),
+                    // 00000000 rather than empty for a current plate: Adabas
+                    // already uses 0 to mean "not expired", and an all-numeric
+                    // field lets the applier read it as N8 with no conversion.
+                    "PLATE_NO, SOURCE_ISN,"
+                            + " NVL(TO_CHAR(EXPIRY_DATE,'YYYYMMDD'),'00000000')"
+                            + " AS EXPIRY_DATE")),
             "SELECT VIN, SOURCE_ISN, OWNER_NATIONAL_ID, MAKE, MODEL, COLOR,"
                     + " TO_CHAR(YEAR_BUILT) AS YEAR_BUILT, SOURCE_VEHICLE_TYPE,"
                     + " VEHICLE_TYPE_CODE, SOURCE_FUEL_DESC"
@@ -227,15 +232,15 @@ public final class AggregateDef {
     /**
      * Every aggregate this capture engine ACTIVELY syncs.
      *
-     * <p>⚠️ {@link #VEHICLE} is defined above but deliberately absent here, and
-     * its tables are absent from {@code table.include.list} too. It has no Hop
-     * pipeline and no Natural applier yet, and an aggregate that is captured
-     * with nowhere to be applied is not half-finished — it is <b>silently
-     * dropped at the mapping stage</b>, which looks exactly like a working sync
-     * until someone checks Adabas. Enabling it means adding it in both places
-     * at once, together with the pipeline and the applier.
+     * <p>⚠️ An aggregate listed here is captured, so something downstream must be
+     * able to map and apply it: a Hop pipeline, an entry in {@code sync-apply.hwf},
+     * a Natural applier, and the matching work file in {@code run-apply.sh}.
+     * Captured with nowhere to be applied is not half-finished — it is
+     * <b>silently dropped at the mapping stage</b>, which looks exactly like a
+     * working sync until someone checks Adabas. {@code table.include.list} is
+     * the other half of the switch and must be changed with this list.
      */
     public static List<AggregateDef> all() {
-        return List.of(TRAFFIC_FINE);
+        return List.of(TRAFFIC_FINE, VEHICLE);
     }
 }
