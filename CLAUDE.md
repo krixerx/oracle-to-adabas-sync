@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for Claude Code when working in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What this is
 
@@ -38,14 +38,59 @@ sync-verify.cmd                    :: the acceptance suite
 Running the sync for real instead of testing it:
 
 ```bat
-docker compose --profile sync up -d hop-server
-java -jar capture\target\oracle-capture.jar capture\capture-local.properties
-scripts\sync-pump.ps1 -Watch       :: or without -Watch: drain once and exit
+sync-start.cmd                     :: lab + Hop Server + capture and pump, each in its own window
 check-employee.cmd 11100102        :: one record, Oracle and Adabas side by side
 ```
 
+`sync-start.cmd` is the whole live path. The pieces it starts, if you want them
+separately:
+
+```bat
+docker compose --profile sync up -d hop-server
+java -jar capture\target\oracle-capture.jar capture\capture-local.properties [seconds]
+scripts\sync-pump.ps1 -Watch       :: or without -Watch: drain once and exit
+```
+
+The capture jar's optional second argument is a **run duration in seconds**
+(`sync-start.cmd` passes 28800, so a forgotten window stops mining after 8 hours). Any
+key in `capture-local.properties` can be overridden by the same name in upper snake case
+as an environment variable (`DATABASE_HOSTNAME`) — that is how one file serves both a
+host run (`localhost`) and an in-network run (`oracle`).
+
 Ad-hoc SQL: `docker exec -it o2a-oracle sqlplus pocapp/pocapp@//localhost:1521/FREEPDB1`.
 Container prefix is `o2a-` (the sibling lab uses `a2o-` — easy to mistype).
+
+## Testing a change without running the whole suite
+
+`scripts/sync-verify.ps1` is monolithic — **there is no flag to run a single criterion**,
+it takes several minutes, and it is destructive: it clears `sync/`, resets the ledger,
+rewrites employee `11100102`, creates and deletes `ZZ777702`, and **stops and restarts
+Adabas** in criterion 9. Run it to prove the whole pipeline, not to iterate.
+
+To iterate, drive one stage at a time (`TESTING_GUIDE.md` §2 is the long form):
+
+```bat
+:: map one outbox batch by hand - exactly what the pump's REST call does
+curl -u cluster:cluster "http://localhost:8081/hop/execWorkflow/?workflow=/poc/hop/workflows/sync-apply.hwf&runConfig=local&level=Basic&BATCH_IN=/sync/outbox/batch-000001&BATCH_OUT=/sync/inbox/batch-000001"
+
+powershell -File scripts\make-batch-info.ps1 batch-000001   :: batch_info.dat + _COMPLETE
+docker exec o2a-natural sh /poc/natural/run-apply.sh batch-000001
+docker exec o2a-natural sh /poc/natural/run-dump.sh 11100102
+docker exec o2a-natural sh /poc/natural/run-reset-ledger.sh :: lets the same batch apply again
+```
+
+`run-dump.sh` (DUMPEMP) reads Adabas independently of the sync's own bookkeeping — which
+is why assertions go through it and never through the ledger or the batch files.
+
+What has to be rebuilt or restarted after an edit:
+
+| Edited | Needed |
+|---|---|
+| `capture/**.java`, `capture.properties` | `mvn -f capture\pom.xml package`, restart the capture process |
+| `hop/pipelines/*.hpl`, `hop/workflows/*.hwf` | nothing — Hop Server reads them off the bind mount per run |
+| `hop/project-config.json`, `docker-compose.yml` | `docker compose --profile sync up -d hop-server` |
+| `natural/*.NSP`, `*.NSD` | nothing — `run-apply.sh` re-copies and `ftouch`es the sources every run |
+| `oracle-init/*.sql` | `docker compose down -v`, or apply the DDL by hand (see below) |
 
 ## Where each concern lives
 
@@ -72,6 +117,13 @@ payload.** A row delta means only "aggregate X changed"; `AggregateResolver` the
 X in full with ordinary SQL. Do not "optimise" this into reconstructing state from deltas
 — full-set replacement, child-key resolution and idempotent apply all fall out of it.
 
+**The VEHICLE aggregate is only half wired.** `POCAPP.VEHICLE` is in `table.include.list`
+and `AggregateDef.VEHICLE` exists, so every batch carries a `vehicle.csv` — but there is
+no Hop pipeline, no entry in `sync-apply.hwf` and no Natural apply program, so a vehicle
+change is captured and then **silently dropped at the mapping stage**. Finishing it is the
+worked example of "a new aggregate" below; until then, a passing suite is not evidence
+that vehicles sync.
+
 ## Invariants — breaking these corrupts data silently
 
 - **`_COMPLETE` is written last**, in both `outbox/` and `inbox/`. It is the commit point
@@ -82,6 +134,9 @@ X in full with ordinary SQL. Do not "optimise" this into reconstructing state fr
   ledger refuses any batch not newer than its watermark, so applying N+1 after N failed
   moves the watermark past N and N can then *never* be applied: a permanent, silent gap.
   Ordered delivery requires halting, not skipping.
+- **Batch numbers must keep rising across restarts.** `BatchWriter` derives the next one
+  by scanning `outbox/`, `applied/` and `rejected/`; emptying those without also resetting
+  the ledger makes every new batch look already-applied.
 - **`op=U` is a full-state upsert, never a diff**, and **child sets are complete**. No
   child rows for a parent means the set is now *empty*, not "unchanged" — which is why
   `BatchWriter` writes every known file **header-only** when it has no rows. Omitting the
@@ -120,15 +175,18 @@ experiment that breaks it on purpose.
   it. A wrong layout must fail loudly rather than shift values sideways — that is the
   whole reason this leg is fixed-width and not CSV.
 - **A new aggregate or table** → `capture.properties` `table.include.list` +
-  `AggregateDef`/`AggregateResolver` + a Hop pipeline + `sync-apply.hwf` + a Natural
-  apply program + `CHANGE_FILE_CONTRACT.md`.
+  `AggregateDef` (both `all()` and `BY_TABLE` — `all()` is what puts the file in a batch)
+  + `AggregateResolver` + a Hop pipeline + `sync-apply.hwf` + a Natural apply program +
+  the work-file list in `natural/run-apply.sh` + `CHANGE_FILE_CONTRACT.md`. Miss the last
+  four and the data is captured and then dropped, exactly as VEHICLE is today.
 - **`capture/src/main/resources/capture.properties` and `capture/capture-local.properties`
-  are near-duplicates** — the packaged default and the host-run copy. Edit both, or the
-  jar and the local run diverge.
+  are duplicates** — the packaged default and the host-run copy. Edit both, or the jar and
+  the local run diverge.
 - **Target schema** → `oracle-init/01_schema.sql` *and* `04_seed.sql` (the post-migration
   demo snapshot that lets this lab run without the sibling repo).
 - `oracle-init/` runs **only on first container start**; schema changes need
-  `docker compose down -v` or manual DDL.
+  `docker compose down -v` or manual DDL. `03_cdc_setup.sql` is the exception —
+  `setup-cdc.ps1` applies it to an already-running container.
 
 ## Traps that have already cost time
 
@@ -166,6 +224,9 @@ Each has a comment at the site explaining it; don't tidy the comment away.
 - **`ARCHIVELOG` fills the disk.** There is no `rman` in `gvenzl/oracle-free:23-slim`, so
   archive logs go to a plain directory rather than the FRA and nothing reclaims them. Run
   `scripts/purge-archivelogs.sh` periodically.
+- **Cold capture needs ~25 s** to mine the data dictionary before it can emit anything;
+  `sync-start.cmd` and the verify harness both wait for that. A change made in Oracle
+  sooner looks like a lost change and is not one.
 - **Ports 60001, 8190, 2700, 1521, 8081** overlap the sibling lab (all but 8081). One lab
   at a time.
 - **Line endings are load-bearing.** `.gitattributes` keeps `.sh`/`.NSP`/`.NSD`/`.hpl` at
@@ -179,6 +240,8 @@ Each has a comment at the site explaining it; don't tidy the comment away.
 - `specs/oracle-to-adabas-sync.md` is the design of record — decisions D1–D8, the six
   gating spikes and their results, and the open items. Check a decision there before
   reversing it; the reasoning is usually load-bearing.
+- `specs/sync-observability.md` is a **design, not built code**. Nothing in this lab
+  alerts: a halted pump is silent and stays silent. Don't cite it as a shipped feature.
 - Comments here explain *why*, usually a bug paid for once. Match that density.
 - **Never commit** CE binaries, the built `capture/target/` jar, `sync/` runtime state, or
   the Oracle JDBC jar. Adabas & Natural CE are licensed for personal use and learning
