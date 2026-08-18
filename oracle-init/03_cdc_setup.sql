@@ -122,8 +122,11 @@ ALTER USER c##dbzuser QUOTA UNLIMITED ON users;
 
 DECLARE
   TYPE t_tabs IS TABLE OF VARCHAR2(40);
-  v_tabs t_tabs := t_tabs('EMPLOYEE', 'EMPLOYEE_ADDRESS_LINE',
-                          'EMPLOYEE_LANGUAGE', 'EMPLOYEE_INCOME', 'VEHICLE');
+  -- The synced tables: the two aggregate roots and their child tables. The
+  -- lookup tables and MIGRATION_REJECT are deliberately absent - they are not
+  -- replicated, so logging them would only add redo.
+  v_tabs t_tabs := t_tabs('VEHICLE', 'VEHICLE_PLATE', 'TRAFFIC_FINE',
+                          'TRAFFIC_FINE_OFFENCE', 'TRAFFIC_FINE_PAYMENT');
 BEGIN
   FOR i IN 1 .. v_tabs.COUNT LOOP
     -- SYNCAPP must be able to write every synced table (apply-back leg)
